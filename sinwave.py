@@ -5,6 +5,11 @@ import math
 import numpy as np
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
+# MIDI-driven color morph (defaults)
+COLOR_1 = (50, 50, 255)
+COLOR_2 = (255, 50, 50)
+_last_cc_value = 0  # 0-127
+
 # Global pixel state as a numpy array for fast access
 # Shape: (height, width, 3) for RGB values
 pixel_state = None
@@ -166,13 +171,44 @@ def activate():
     return
 
 
-def draw(canvas, matrix, t_point, colour=(50, 50, 255)):
+def handle_midi_cc(cc):
+    """
+    Called by main.py when MIDI CC messages arrive.
+    We use the most recent CC value to morph the wave color.
+    """
+    global _last_cc_value
+    try:
+        v = int(getattr(cc, "value", 0))
+    except Exception:
+        return
+    if v < 0:
+        v = 0
+    elif v > 127:
+        v = 127
+    _last_cc_value = v
+
+
+def _lerp_color(c1, c2, t):
+    """Fast-ish integer lerp between two RGB tuples."""
+    return (
+        int(c1[0] + (c2[0] - c1[0]) * t),
+        int(c1[1] + (c2[1] - c1[1]) * t),
+        int(c1[2] + (c2[2] - c1[2]) * t),
+    )
+
+
+def draw(canvas, matrix, t_point, colour=None):
     """
     Draw a frame at time t_point (seconds).
     Caller should clear the canvas before calling if desired.
     """
     if pixel_state is None or pixel_state.shape[0] != matrix.height or pixel_state.shape[1] != matrix.width:
         setup(matrix)
+
+    # If caller didn't override colour, compute it from MIDI (0->COLOR_1, 127->COLOR_2).
+    if colour is None:
+        morph = _last_cc_value / 127.0
+        colour = _lerp_color(COLOR_1, COLOR_2, morph)
 
     clear_pixel_state()
     draw_sine_wave(canvas, matrix, t_point, colour=colour, frequency=0.15, blend=False)

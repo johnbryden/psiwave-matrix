@@ -164,6 +164,11 @@ def activate():
     _last_t_point = None
 
 
+def handle_midi_cc(cc):
+    """Hook for MIDI CC messages (currently unused)."""
+    return
+
+
 def draw(canvas, matrix, t_point):
     """
     Draw a frame of the starfield at time t_point (seconds).
