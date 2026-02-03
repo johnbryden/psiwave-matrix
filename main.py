@@ -88,6 +88,35 @@ class MidiCCIn:
                     break
             else:
                 print(f"[midi] port query '{port_query}' not found; using first input instead")
+        else:
+            # Heuristic default: avoid the usually-useless "Midi Through" and prefer a real "Midi In".
+            def _score_port(name: str) -> int:
+                s = name.lower()
+                score = 0
+                if "midi in" in s:
+                    score += 100
+                if "through" in s:
+                    score -= 100
+                else:
+                    score += 10
+                # Mild preference for typical USB MIDI names.
+                if "usb" in s or "controller" in s or "keyboard" in s:
+                    score += 5
+                return score
+
+            best_i = 0
+            best_score = _score_port(ports[0])
+            for i in range(1, len(ports)):
+                sc = _score_port(ports[i])
+                if sc > best_score:
+                    best_score = sc
+                    best_i = i
+            chosen_idx = best_i
+
+        print("[midi] available inputs:")
+        for i, n in enumerate(ports):
+            marker = " <==" if i == chosen_idx else ""
+            print(f"[midi]   {i:2d}: {n}{marker}")
 
         try:
             self._midiin.open_port(chosen_idx)
