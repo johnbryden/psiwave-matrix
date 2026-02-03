@@ -54,7 +54,15 @@ class MidiCCIn:
             self._midiin = MidiIn()
             # We only care about channel voice messages; ignore sysex/timing/active sense.
             if hasattr(self._midiin, "ignore_types"):
-                self._midiin.ignore_types(sysex=True, timing=True, sensing=True)
+                try:
+                    # Most common signature (python-rtmidi): active_sense
+                    self._midiin.ignore_types(sysex=True, timing=True, active_sense=True)
+                except TypeError:
+                    # Older builds sometimes use different names or only positional args.
+                    try:
+                        self._midiin.ignore_types(True, True, True)
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"[midi] disabled (could not initialize MIDI input): {e}")
             self._midiin = None
