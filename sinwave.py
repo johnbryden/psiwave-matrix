@@ -5,15 +5,6 @@ import math
 import numpy as np
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
-# Try to import numba for JIT compilation, fall back gracefully if not available
-try:
-    from numba import jit, njit
-    NUMBA_AVAILABLE = True
-    print("Numba available - compiling for speed!")
-except ImportError:
-    NUMBA_AVAILABLE = False
-    print("Numba not available - running in interpreted mode")
-
 # Global pixel state as a numpy array for fast access
 # Shape: (height, width, 3) for RGB values
 pixel_state = None
@@ -23,31 +14,17 @@ def init_pixel_state(height, width):
     global pixel_state
     pixel_state = np.zeros((height, width, 3), dtype=np.uint8)
 
-# Compile the core pixel manipulation function if numba is available
-if NUMBA_AVAILABLE:
-    @njit(cache=True)
-    def _fast_pixel_blend(current_color, c1, c2, c3):
-        """Fast compiled pixel blending"""
-        blended_r = max(current_color[0], c1)
-        blended_g = max(current_color[1], c2)
-        blended_b = max(current_color[2], c3)
-        return blended_r, blended_g, blended_b
-    
-    @njit(cache=True)
-    def _fast_color_dim(color, dim_factor):
-        """Fast compiled color dimming"""
-        return int(color[0] * dim_factor), int(color[1] * dim_factor), int(color[2] * dim_factor)
-else:
-    def _fast_pixel_blend(current_color, c1, c2, c3):
-        """Fallback pixel blending"""
-        blended_r = max(current_color[0], c1)
-        blended_g = max(current_color[1], c2)
-        blended_b = max(current_color[2], c3)
-        return blended_r, blended_g, blended_b
-    
-    def _fast_color_dim(color, dim_factor):
-        """Fallback color dimming"""
-        return int(color[0] * dim_factor), int(color[1] * dim_factor), int(color[2] * dim_factor)
+def _fast_pixel_blend(current_color, c1, c2, c3):
+    """Pixel blending (no numba dependency)."""
+    blended_r = max(current_color[0], c1)
+    blended_g = max(current_color[1], c2)
+    blended_b = max(current_color[2], c3)
+    return blended_r, blended_g, blended_b
+
+
+def _fast_color_dim(color, dim_factor):
+    """Color dimming helper (no numba dependency)."""
+    return int(color[0] * dim_factor), int(color[1] * dim_factor), int(color[2] * dim_factor)
 
 def draw_pixels(canvas, x, y, c1, c2, c3, blend=True, buffer=True):
     """
