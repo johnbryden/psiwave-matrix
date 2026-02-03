@@ -15,6 +15,10 @@ _stars = None
 _last_t_point = None
 _is_setup = False
 
+# Optional MIDI-driven controls (set by main.py)
+_speed_mult = 1.0       # 0.5..4 typical
+_color_amount = 1.0     # 0=white, 1=colored (default preserves current look)
+
 def init_pixel_state(height, width):
     """Initialize the pixel state array"""
     global pixel_state
@@ -107,19 +111,32 @@ class Star:
         
         # Apply color based on star type
         if self.color_type == 'white':
-            return (brightness, brightness, brightness)
+            colored = (brightness, brightness, brightness)
         elif self.color_type == 'blue':
-            return (brightness//3, brightness//3, brightness)
+            colored = (brightness//3, brightness//3, brightness)
         elif self.color_type == 'cyan':
-            return (brightness//3, brightness, brightness)
+            colored = (brightness//3, brightness, brightness)
         elif self.color_type == 'yellow':
-            return (brightness, brightness, brightness//3)
+            colored = (brightness, brightness, brightness//3)
         elif self.color_type == 'orange':
-            return (brightness, brightness//2, brightness//6)
+            colored = (brightness, brightness//2, brightness//6)
         elif self.color_type == 'red':
-            return (brightness, brightness//6, brightness//6)
+            colored = (brightness, brightness//6, brightness//6)
         else:
-            return (brightness, brightness, brightness)  # fallback to white
+            colored = (brightness, brightness, brightness)  # fallback to white
+
+        # Mix towards white based on _color_amount (0=white, 1=colored).
+        a = _color_amount
+        if a <= 0.0:
+            return (brightness, brightness, brightness)
+        if a >= 1.0:
+            return colored
+        gray = (brightness, brightness, brightness)
+        return (
+            int(gray[0] + (colored[0] - gray[0]) * a),
+            int(gray[1] + (colored[1] - gray[1]) * a),
+            int(gray[2] + (colored[2] - gray[2]) * a),
+        )
     
 
 
@@ -169,6 +186,32 @@ def handle_midi_cc(cc):
     return
 
 
+def set_speed_mult(mult: float) -> None:
+    """Set starfield speed multiplier (0.5..4 typical)."""
+    global _speed_mult
+    try:
+        m = float(mult)
+    except Exception:
+        return
+    if m < 0.0:
+        m = 0.0
+    _speed_mult = m
+
+
+def set_color_amount(amount: float) -> None:
+    """Set starfield color amount (0=white, 1=colored)."""
+    global _color_amount
+    try:
+        a = float(amount)
+    except Exception:
+        return
+    if a < 0.0:
+        a = 0.0
+    elif a > 1.0:
+        a = 1.0
+    _color_amount = a
+
+
 def draw(canvas, matrix, t_point):
     """
     Draw a frame of the starfield at time t_point (seconds).
@@ -182,7 +225,7 @@ def draw(canvas, matrix, t_point):
     if _last_t_point is None:
         dt = 0.0
     else:
-        dt = max(0.0, t_point - _last_t_point)
+        dt = max(0.0, t_point - _last_t_point) * _speed_mult
     _last_t_point = t_point
 
     clear_pixel_state()

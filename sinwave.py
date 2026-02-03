@@ -10,6 +10,11 @@ COLOR_1 = (50, 50, 255)
 COLOR_2 = (255, 50, 50)
 _last_cc_value = 0  # 0-127
 
+# Optional MIDI-driven motion controls (set by main.py)
+_BASE_SPEED = 5.0
+_speed_mult = 1.0        # 0..2 (typical)
+_phase_offset = 0.0      # radians, 0..2π
+
 # Global pixel state as a numpy array for fast access
 # Shape: (height, width, 3) for RGB values
 pixel_state = None
@@ -125,6 +130,7 @@ def draw_sine_wave(
         width = 4,
         dim_factor= 0.6,
         speed=5,
+        phase_offset=0.0,
         blend=True
 ):
     """
@@ -134,7 +140,7 @@ def draw_sine_wave(
     # --- Parameters for the sine wave ---
     vertical_offset = matrix.height / 4 + width-2
 
-    phase = t_point * speed
+    phase = (t_point * speed) + phase_offset
  
     # Iterate through every column (x-coordinate)
     for x in range(matrix.width):
@@ -188,6 +194,46 @@ def handle_midi_cc(cc):
     _last_cc_value = v
 
 
+def set_color_cc_value(v: int) -> None:
+    """Set the color morph amount using a raw CC value (0..127)."""
+    global _last_cc_value
+    try:
+        iv = int(v)
+    except Exception:
+        return
+    if iv < 0:
+        iv = 0
+    elif iv > 127:
+        iv = 127
+    _last_cc_value = iv
+
+
+def set_speed_mult(mult: float) -> None:
+    """Set sine-wave speed multiplier (0..2 typical)."""
+    global _speed_mult
+    try:
+        m = float(mult)
+    except Exception:
+        return
+    if m < 0.0:
+        m = 0.0
+    _speed_mult = m
+
+
+def set_phase_offset(radians: float) -> None:
+    """Set a phase offset in radians (0..2π typical)."""
+    global _phase_offset
+    try:
+        r = float(radians)
+    except Exception:
+        return
+    # Keep it bounded to avoid unbounded growth if someone feeds large values.
+    two_pi = 2.0 * math.pi
+    if two_pi > 0:
+        r = r % two_pi
+    _phase_offset = r
+
+
 def _lerp_color(c1, c2, t):
     """Fast-ish integer lerp between two RGB tuples."""
     return (
@@ -211,7 +257,17 @@ def draw(canvas, matrix, t_point, colour=None):
         colour = _lerp_color(COLOR_1, COLOR_2, morph)
 
     clear_pixel_state()
-    draw_sine_wave(canvas, matrix, t_point, colour=colour, frequency=0.15, blend=False)
+    speed = _BASE_SPEED * _speed_mult
+    draw_sine_wave(
+        canvas,
+        matrix,
+        t_point,
+        colour=colour,
+        frequency=0.15,
+        speed=speed,
+        phase_offset=_phase_offset,
+        blend=False,
+    )
     draw_vertical_bar(canvas, matrix, colour, blend=True)
 
 # --- Main execution block ---

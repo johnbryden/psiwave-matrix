@@ -222,6 +222,14 @@ def main():
     ap.add_argument("--cc-starfield-color", type=int, default=CC_STARFIELD_COLOR, help="CC number for starfield colour.")
     args = ap.parse_args()
 
+    # Log which modules we're actually using (helps catch name-clash issues where an installed
+    # package named `sinwave`/`simple_starfield` is imported instead of the local file).
+    try:
+        print(f"[midi] using sinwave from: {getattr(sinwave, '__file__', '<unknown>')}")
+        print(f"[midi] using starfield from: {getattr(simple_starfield, '__file__', '<unknown>')}")
+    except Exception:
+        pass
+
     matrix = _build_matrix()
     canvas = matrix.CreateFrameCanvas()
 
@@ -300,11 +308,18 @@ def main():
 
                 for cc in mapped_msgs:
                     if cc.control == cc_wave_color:
-                        handler = getattr(sinwave, "handle_midi_cc", None)
-                        if handler is not None:
-                            handler(cc)
+                        # Prefer a dedicated setter so the CC number can be remapped freely.
+                        setter = getattr(sinwave, "set_color_cc_value", None)
+                        if setter is not None:
+                            setter(cc.value)
                             if args.midi_log != "none":
                                 print(f"[midi] wave color -> {_cc_unit(cc.value):.3f}")
+                        else:
+                            handler = getattr(sinwave, "handle_midi_cc", None)
+                            if handler is not None:
+                                handler(cc)
+                                if args.midi_log != "none":
+                                    print(f"[midi] wave color -> {_cc_unit(cc.value):.3f}")
                     elif cc.control == cc_wave_speed:
                         # 0..2x
                         mult = _lerp(0.0, 2.0, _cc_unit(cc.value))
@@ -313,6 +328,17 @@ def main():
                             setter(mult)
                             if args.midi_log != "none":
                                 print(f"[midi] wave speed -> {mult:.3f}x")
+                        else:
+                            # Back-compat: allow older sinwave modules by mutating module state.
+                            if hasattr(sinwave, "_speed_mult"):
+                                try:
+                                    setattr(sinwave, "_speed_mult", float(mult))
+                                    if args.midi_log != "none":
+                                        print(f"[midi] wave speed -> {mult:.3f}x (compat)")
+                                except Exception:
+                                    pass
+                            elif args.midi_log != "none":
+                                print("[midi] wave speed: no handler found in sinwave module")
                     elif cc.control == cc_wave_phase:
                         # 0..2π
                         import math
@@ -322,6 +348,16 @@ def main():
                             setter(radians)
                             if args.midi_log != "none":
                                 print(f"[midi] wave phase -> {radians:.3f} rad")
+                        else:
+                            if hasattr(sinwave, "_phase_offset"):
+                                try:
+                                    setattr(sinwave, "_phase_offset", float(radians))
+                                    if args.midi_log != "none":
+                                        print(f"[midi] wave phase -> {radians:.3f} rad (compat)")
+                                except Exception:
+                                    pass
+                            elif args.midi_log != "none":
+                                print("[midi] wave phase: no handler found in sinwave module")
                     elif cc.control == cc_starfield_speed:
                         # 0.5..4x
                         mult = _lerp(0.5, 4.0, _cc_unit(cc.value))
@@ -330,6 +366,16 @@ def main():
                             setter(mult)
                             if args.midi_log != "none":
                                 print(f"[midi] starfield speed -> {mult:.3f}x")
+                        else:
+                            if hasattr(simple_starfield, "_speed_mult"):
+                                try:
+                                    setattr(simple_starfield, "_speed_mult", float(mult))
+                                    if args.midi_log != "none":
+                                        print(f"[midi] starfield speed -> {mult:.3f}x (compat)")
+                                except Exception:
+                                    pass
+                            elif args.midi_log != "none":
+                                print("[midi] starfield speed: no handler found in simple_starfield module")
                     elif cc.control == cc_starfield_color:
                         # 0..1 (white -> colored)
                         amt = _cc_unit(cc.value)
@@ -338,6 +384,16 @@ def main():
                             setter(amt)
                             if args.midi_log != "none":
                                 print(f"[midi] starfield color -> {amt:.3f}")
+                        else:
+                            if hasattr(simple_starfield, "_color_amount"):
+                                try:
+                                    setattr(simple_starfield, "_color_amount", float(amt))
+                                    if args.midi_log != "none":
+                                        print(f"[midi] starfield color -> {amt:.3f} (compat)")
+                                except Exception:
+                                    pass
+                            elif args.midi_log != "none":
+                                print("[midi] starfield color: no handler found in simple_starfield module")
 
             next_idx = int(t_point // SWITCH_SECONDS) % len(demos)
             if next_idx != active_idx:
