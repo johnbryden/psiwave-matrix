@@ -239,9 +239,22 @@ def main():
             # Drain MIDI CC messages and route mapped controls.
             cc_msgs = midi.drain(now_t=t_point)
             if cc_msgs:
-                for cc in cc_msgs:
-                    print(f"[midi] t={cc.t:7.3f}s ch={cc.channel:2d} cc={cc.control:3d} val={cc.value:3d}")
-                for cc in cc_msgs:
+                mapped_controls = {
+                    CC_WAVE_SPEED,
+                    CC_WAVE_COLOR,
+                    CC_WAVE_PHASE,
+                    CC_STARFIELD_SPEED,
+                    CC_STARFIELD_COLOR,
+                }
+                mapped_msgs = [cc for cc in cc_msgs if cc.control in mapped_controls]
+                if mapped_msgs:
+                    print(
+                        f"[midi] mapped CC detected ({len(mapped_msgs)} msg{'s' if len(mapped_msgs) != 1 else ''})"
+                    )
+                    for cc in mapped_msgs:
+                        print(f"[midi] t={cc.t:7.3f}s ch={cc.channel:2d} cc={cc.control:3d} val={cc.value:3d}")
+
+                for cc in mapped_msgs:
                     if cc.control == CC_WAVE_COLOR:
                         handler = getattr(sinwave, "handle_midi_cc", None)
                         if handler is not None:
@@ -252,6 +265,7 @@ def main():
                         setter = getattr(sinwave, "set_speed_mult", None)
                         if setter is not None:
                             setter(mult)
+                            print(f"[midi] wave speed -> {mult:.3f}x")
                     elif cc.control == CC_WAVE_PHASE:
                         # 0..2π
                         import math
@@ -259,18 +273,21 @@ def main():
                         setter = getattr(sinwave, "set_phase_offset", None)
                         if setter is not None:
                             setter(radians)
+                            print(f"[midi] wave phase -> {radians:.3f} rad")
                     elif cc.control == CC_STARFIELD_SPEED:
                         # 0.5..4x
                         mult = _lerp(0.5, 4.0, _cc_unit(cc.value))
                         setter = getattr(simple_starfield, "set_speed_mult", None)
                         if setter is not None:
                             setter(mult)
+                            print(f"[midi] starfield speed -> {mult:.3f}x")
                     elif cc.control == CC_STARFIELD_COLOR:
                         # 0..1 (white -> colored)
                         amt = _cc_unit(cc.value)
                         setter = getattr(simple_starfield, "set_color_amount", None)
                         if setter is not None:
                             setter(amt)
+                            print(f"[midi] starfield color -> {amt:.3f}")
 
             next_idx = int(t_point // SWITCH_SECONDS) % len(demos)
             if next_idx != active_idx:
