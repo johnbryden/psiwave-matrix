@@ -19,11 +19,11 @@ TARGET_FPS = 60.0
 # 3: Phase of wave
 # 4: Speed of starfield (0.5..4x current)
 # 5: Colour of starfield (white -> coloured)
-CC_WAVE_SPEED = 43
-CC_WAVE_COLOR = 44
-CC_WAVE_PHASE = 16
-CC_STARFIELD_SPEED = 17
-CC_STARFIELD_COLOR = 25
+CC_WAVE_SPEED = 102
+CC_WAVE_COLOR = 108
+CC_WAVE_PHASE = 104
+CC_STARFIELD_SPEED = 101
+CC_STARFIELD_COLOR = 102
 
 
 def _cc_unit(v: int) -> float:
