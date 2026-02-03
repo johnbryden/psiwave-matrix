@@ -18,7 +18,10 @@ _phase_offset = 0.0      # radians, 0..2π
 # Optional MIDI-driven wavelength control (set by main.py)
 # This is implemented as a multiplier on the existing "frequency" coefficient used in:
 #   sin(frequency * x + phase)
-# Smaller multiplier -> longer wavelength (visually slower spatial oscillation).
+# We interpret the control as a *wavelength* multiplier:
+#   smaller multiplier -> shorter wavelength
+# To achieve that while this function consumes a frequency coefficient, we invert it:
+#   effective_frequency = _BASE_FREQUENCY / wavelength_mult
 _BASE_FREQUENCY = 0.15
 _wavelength_mult = 1.0    # 1.0 at CC=0 .. 0.25 at CC=127
 
@@ -253,8 +256,8 @@ def set_wavelength_mult(mult: float) -> None:
     """
     Set sine-wave wavelength multiplier.
 
-    Implemented as: effective_frequency = _BASE_FREQUENCY * mult
-    Typical mapping is 1.0 at CC=0 and 0.25 at CC=127 (longer wavelength).
+    Implemented as: effective_frequency = _BASE_FREQUENCY / mult
+    Typical mapping is 1.0 at CC=0 and 0.25 at CC=127 (shorter wavelength).
     """
     global _wavelength_mult
     try:
@@ -304,9 +307,10 @@ def draw(canvas, matrix, t_point, colour=None):
 
     speed = _BASE_SPEED * _speed_mult
     _phase_accum += speed * dt
-    frequency = _BASE_FREQUENCY * _wavelength_mult
-    if frequency < 0.0001:
-        frequency = 0.0001
+    denom = _wavelength_mult
+    if denom < 0.0001:
+        denom = 0.0001
+    frequency = _BASE_FREQUENCY / denom
 
     draw_sine_wave(
         canvas,
