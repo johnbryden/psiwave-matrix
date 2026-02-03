@@ -250,6 +250,18 @@ def main():
     cc_starfield_speed = _clamp_cc(args.cc_starfield_speed)
     cc_starfield_color = _clamp_cc(args.cc_starfield_color)
 
+    cc_map = {
+        "wave_speed": cc_wave_speed,
+        "wave_color": cc_wave_color,
+        "wave_phase": cc_wave_phase,
+        "starfield_speed": cc_starfield_speed,
+        "starfield_color": cc_starfield_color,
+    }
+    by_cc = {}
+    for name, n in cc_map.items():
+        by_cc.setdefault(n, []).append(name)
+    dupes = {n: names for n, names in by_cc.items() if len(names) > 1}
+
     print(
         "[midi] CC map:"
         f" wave_speed={cc_wave_speed}"
@@ -259,6 +271,9 @@ def main():
         f" starfield_color={cc_starfield_color}"
         f" (log={args.midi_log})"
     )
+    if dupes:
+        pretty = ", ".join([f"cc={n}: {names}" for n, names in sorted(dupes.items())])
+        print(f"[midi] WARNING: duplicate CC assignments detected ({pretty}). All mapped actions will run.")
 
     # If we're doing MIDI logging, also enable demo-level debug logs where available.
     if args.midi_log != "none":
@@ -315,6 +330,8 @@ def main():
                         print(f"[midi] t={cc.t:7.3f}s ch={cc.channel:2d} cc={cc.control:3d} val={cc.value:3d}")
 
                 for cc in mapped_msgs:
+                    # NOTE: these are intentionally *not* elif, so if a CC number is
+                    # assigned to multiple actions (by user config), everything still runs.
                     if cc.control == cc_wave_color:
                         # Prefer a dedicated setter so the CC number can be remapped freely.
                         setter = getattr(sinwave, "set_color_cc_value", None)
@@ -328,7 +345,7 @@ def main():
                                 handler(cc)
                                 if log_mapped:
                                     print(f"[midi] wave color -> {_cc_unit(cc.value):.3f}")
-                    elif cc.control == cc_wave_speed:
+                    if cc.control == cc_wave_speed:
                         # 0..2x
                         mult = _lerp(0.0, 2.0, _cc_unit(cc.value))
                         setter = getattr(sinwave, "set_speed_mult", None)
@@ -345,7 +362,7 @@ def main():
                                         print(f"[midi] wave speed -> {mult:.3f}x (compat)")
                                 except Exception:
                                     pass
-                    elif cc.control == cc_wave_phase:
+                    if cc.control == cc_wave_phase:
                         # 0..2π
                         import math
                         radians = _lerp(0.0, 2.0 * math.pi, _cc_unit(cc.value))
@@ -362,7 +379,7 @@ def main():
                                         print(f"[midi] wave phase -> {radians:.3f} rad (compat)")
                                 except Exception:
                                     pass
-                    elif cc.control == cc_starfield_speed:
+                    if cc.control == cc_starfield_speed:
                         # 0.5..4x
                         mult = _lerp(0.5, 4.0, _cc_unit(cc.value))
                         setter = getattr(simple_starfield, "set_speed_mult", None)
@@ -378,7 +395,7 @@ def main():
                                         print(f"[midi] starfield speed -> {mult:.3f}x (compat)")
                                 except Exception:
                                     pass
-                    elif cc.control == cc_starfield_color:
+                    if cc.control == cc_starfield_color:
                         # 0..1 (white -> colored)
                         amt = _cc_unit(cc.value)
                         setter = getattr(simple_starfield, "set_color_amount", None)
