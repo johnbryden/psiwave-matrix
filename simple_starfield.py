@@ -18,6 +18,8 @@ _is_setup = False
 # Optional MIDI-driven controls (set by main.py)
 _speed_mult = 1.0       # 0.5..4 typical
 _color_amount = 1.0     # 0=grayscale (no hue), 1=colored (default preserves current look)
+# Treat very small color amounts as 0 to avoid faint tint from CC jitter/rounding.
+_COLOR_DEADZONE = 0.03  # 0..1
 
 def init_pixel_state(height, width):
     """Initialize the pixel state array"""
@@ -127,7 +129,7 @@ class Star:
 
         # Mix towards white based on _color_amount (0=white, 1=colored).
         a = _color_amount
-        if a <= 0.0:
+        if a <= _COLOR_DEADZONE:
             # When color is removed, return pure grayscale (no hue).
             return (brightness, brightness, brightness)
         if a >= 1.0:
@@ -210,6 +212,8 @@ def set_color_amount(amount: float) -> None:
         a = 0.0
     elif a > 1.0:
         a = 1.0
+    if a <= _COLOR_DEADZONE:
+        a = 0.0
     _color_amount = a
 
 
