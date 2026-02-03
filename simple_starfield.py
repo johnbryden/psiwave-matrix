@@ -17,7 +17,7 @@ _is_setup = False
 
 # Optional MIDI-driven controls (set by main.py)
 _speed_mult = 1.0       # 0.5..4 typical
-_color_amount = 1.0     # 0=white, 1=colored (default preserves current look)
+_color_amount = 1.0     # 0=grayscale (no hue), 1=colored (default preserves current look)
 
 def init_pixel_state(height, width):
     """Initialize the pixel state array"""
@@ -128,6 +128,7 @@ class Star:
         # Mix towards white based on _color_amount (0=white, 1=colored).
         a = _color_amount
         if a <= 0.0:
+            # When color is removed, return pure grayscale (no hue).
             return (brightness, brightness, brightness)
         if a >= 1.0:
             return colored

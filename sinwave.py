@@ -15,6 +15,12 @@ _BASE_SPEED = 5.0
 _speed_mult = 1.0        # 0..2 (typical)
 _phase_offset = 0.0      # radians, 0..2π
 
+# Motion integrator state:
+# We integrate phase as ∫(speed dt) so speed changes don't cause a phase jump.
+_phase_accum = 0.0
+_last_t_point = None  # type: float | None
+_MAX_DT = 0.10  # seconds; clamp to avoid huge jumps after stalls/switches
+
 # Global pixel state as a numpy array for fast access
 # Shape: (height, width, 3) for RGB values
 pixel_state = None
@@ -173,8 +179,10 @@ def setup(matrix):
 
 
 def activate():
-    """Hook for demo switching (currently no-op)."""
-    return
+    """Hook for demo switching; reset motion integrator for continuity."""
+    global _phase_accum, _last_t_point
+    _phase_accum = 0.0
+    _last_t_point = None
 
 
 def handle_midi_cc(cc):
@@ -257,14 +265,27 @@ def draw(canvas, matrix, t_point, colour=None):
         colour = _lerp_color(COLOR_1, COLOR_2, morph)
 
     clear_pixel_state()
+    # Integrate phase over time so changing speed doesn't "teleport" the wave.
+    global _phase_accum, _last_t_point
+    if _last_t_point is None:
+        dt = 0.0
+    else:
+        dt = t_point - _last_t_point
+        if dt < 0.0:
+            dt = 0.0
+        elif dt > _MAX_DT:
+            dt = _MAX_DT
+    _last_t_point = t_point
+
     speed = _BASE_SPEED * _speed_mult
+    _phase_accum += speed * dt
     draw_sine_wave(
         canvas,
         matrix,
-        t_point,
+        _phase_accum,
         colour=colour,
         frequency=0.15,
-        speed=speed,
+        speed=1.0,
         phase_offset=_phase_offset,
         blend=False,
     )
