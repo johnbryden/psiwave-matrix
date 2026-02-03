@@ -211,9 +211,14 @@ def main():
     ap.add_argument("--midi-port", default=None, help="MIDI input port name (substring match). Default: any.")
     ap.add_argument(
         "--midi-log",
-        choices=("mapped", "all", "none"),
+        choices=("mapped", "all", "both", "none"),
         default="none",
-        help="MIDI logging mode. 'none' (default) disables turn-by-turn logs; 'mapped' logs only mapped CCs; 'all' logs all CCs.",
+        help=(
+            "MIDI logging mode. 'none' (default) disables turn-by-turn logs; "
+            "'mapped' logs only mapped CCs (+ derived parameter changes); "
+            "'all' logs all CCs (mapped+unmapped); "
+            "'both' logs all CCs AND the mapped summaries/derived changes."
+        ),
     )
     ap.add_argument("--cc-wave-speed", type=int, default=CC_WAVE_SPEED, help="CC number for wave speed.")
     ap.add_argument("--cc-wave-color", type=int, default=CC_WAVE_COLOR, help="CC number for wave colour.")
@@ -273,6 +278,9 @@ def main():
             # Drain MIDI CC messages and route mapped controls.
             cc_msgs = midi.drain(now_t=t_point)
             if cc_msgs:
+                log_all = args.midi_log in ("all", "both")
+                log_mapped = args.midi_log in ("mapped", "both")
+
                 mapped_controls = {
                     cc_wave_speed,
                     cc_wave_color,
@@ -281,14 +289,14 @@ def main():
                     cc_starfield_color,
                 }
                 mapped_msgs = [cc for cc in cc_msgs if cc.control in mapped_controls]
-                if args.midi_log == "all":
+                if log_all:
                     for cc in cc_msgs:
                         tag = "mapped" if cc.control in mapped_controls else "unmapped"
                         print(
                             f"[midi] {tag} t={cc.t:7.3f}s ch={cc.channel:2d} cc={cc.control:3d} val={cc.value:3d}"
                         )
 
-                if mapped_msgs and args.midi_log == "mapped":
+                if mapped_msgs and log_mapped:
                     unique_controls = sorted({cc.control for cc in mapped_msgs})
                     print(
                         f"[midi] mapped CC detected ({len(mapped_msgs)} msg{'s' if len(mapped_msgs) != 1 else ''}) "
@@ -303,13 +311,13 @@ def main():
                         setter = getattr(sinwave, "set_color_cc_value", None)
                         if setter is not None:
                             setter(cc.value)
-                            if args.midi_log == "mapped":
+                            if log_mapped:
                                 print(f"[midi] wave color -> {_cc_unit(cc.value):.3f}")
                         else:
                             handler = getattr(sinwave, "handle_midi_cc", None)
                             if handler is not None:
                                 handler(cc)
-                                if args.midi_log == "mapped":
+                                if log_mapped:
                                     print(f"[midi] wave color -> {_cc_unit(cc.value):.3f}")
                     elif cc.control == cc_wave_speed:
                         # 0..2x
@@ -317,14 +325,14 @@ def main():
                         setter = getattr(sinwave, "set_speed_mult", None)
                         if setter is not None:
                             setter(mult)
-                            if args.midi_log == "mapped":
+                            if log_mapped:
                                 print(f"[midi] wave speed -> {mult:.3f}x")
                         else:
                             # Back-compat: allow older sinwave modules by mutating module state.
                             if hasattr(sinwave, "_speed_mult"):
                                 try:
                                     setattr(sinwave, "_speed_mult", float(mult))
-                                    if args.midi_log == "mapped":
+                                    if log_mapped:
                                         print(f"[midi] wave speed -> {mult:.3f}x (compat)")
                                 except Exception:
                                     pass
@@ -335,13 +343,13 @@ def main():
                         setter = getattr(sinwave, "set_phase_offset", None)
                         if setter is not None:
                             setter(radians)
-                            if args.midi_log == "mapped":
+                            if log_mapped:
                                 print(f"[midi] wave phase -> {radians:.3f} rad")
                         else:
                             if hasattr(sinwave, "_phase_offset"):
                                 try:
                                     setattr(sinwave, "_phase_offset", float(radians))
-                                    if args.midi_log == "mapped":
+                                    if log_mapped:
                                         print(f"[midi] wave phase -> {radians:.3f} rad (compat)")
                                 except Exception:
                                     pass
@@ -351,13 +359,13 @@ def main():
                         setter = getattr(simple_starfield, "set_speed_mult", None)
                         if setter is not None:
                             setter(mult)
-                            if args.midi_log == "mapped":
+                            if log_mapped:
                                 print(f"[midi] starfield speed -> {mult:.3f}x")
                         else:
                             if hasattr(simple_starfield, "_speed_mult"):
                                 try:
                                     setattr(simple_starfield, "_speed_mult", float(mult))
-                                    if args.midi_log == "mapped":
+                                    if log_mapped:
                                         print(f"[midi] starfield speed -> {mult:.3f}x (compat)")
                                 except Exception:
                                     pass
@@ -367,13 +375,13 @@ def main():
                         setter = getattr(simple_starfield, "set_color_amount", None)
                         if setter is not None:
                             setter(amt)
-                            if args.midi_log == "mapped":
+                            if log_mapped:
                                 print(f"[midi] starfield color -> {amt:.3f}")
                         else:
                             if hasattr(simple_starfield, "_color_amount"):
                                 try:
                                     setattr(simple_starfield, "_color_amount", float(amt))
-                                    if args.midi_log == "mapped":
+                                    if log_mapped:
                                         print(f"[midi] starfield color -> {amt:.3f} (compat)")
                                 except Exception:
                                     pass
