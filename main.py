@@ -10,7 +10,7 @@ import sinwave
 import simple_starfield
 
 
-SWITCH_SECONDS = 10.0
+SWITCH_SECONDS = 30.0
 TARGET_FPS = 60.0
 
 # MIDI CC mapping (controller number -> function)
@@ -209,6 +209,17 @@ def _build_matrix():
 def main():
     ap = argparse.ArgumentParser(description="psiwave-matrix demos")
     ap.add_argument("--midi-port", default=None, help="MIDI input port name (substring match). Default: any.")
+    ap.add_argument(
+        "--midi-log",
+        choices=("mapped", "all", "none"),
+        default="mapped",
+        help="MIDI logging mode. 'mapped' logs only mapped CCs (default), 'all' logs all CCs, 'none' logs nothing.",
+    )
+    ap.add_argument("--cc-wave-speed", type=int, default=CC_WAVE_SPEED, help="CC number for wave speed.")
+    ap.add_argument("--cc-wave-color", type=int, default=CC_WAVE_COLOR, help="CC number for wave colour.")
+    ap.add_argument("--cc-wave-phase", type=int, default=CC_WAVE_PHASE, help="CC number for wave phase.")
+    ap.add_argument("--cc-starfield-speed", type=int, default=CC_STARFIELD_SPEED, help="CC number for starfield speed.")
+    ap.add_argument("--cc-starfield-color", type=int, default=CC_STARFIELD_COLOR, help="CC number for starfield colour.")
     args = ap.parse_args()
 
     matrix = _build_matrix()
@@ -220,6 +231,29 @@ def main():
     ]
 
     midi = MidiCCIn(port_query=args.midi_port)
+
+    def _clamp_cc(n: int) -> int:
+        if n < 0:
+            return 0
+        if n > 127:
+            return 127
+        return n
+
+    cc_wave_speed = _clamp_cc(args.cc_wave_speed)
+    cc_wave_color = _clamp_cc(args.cc_wave_color)
+    cc_wave_phase = _clamp_cc(args.cc_wave_phase)
+    cc_starfield_speed = _clamp_cc(args.cc_starfield_speed)
+    cc_starfield_color = _clamp_cc(args.cc_starfield_color)
+
+    print(
+        "[midi] CC map:"
+        f" wave_speed={cc_wave_speed}"
+        f" wave_color={cc_wave_color}"
+        f" wave_phase={cc_wave_phase}"
+        f" starfield_speed={cc_starfield_speed}"
+        f" starfield_color={cc_starfield_color}"
+        f" (log={args.midi_log})"
+    )
 
     # Let each demo initialize any internal buffers/state.
     for _, demo in demos:
@@ -240,54 +274,70 @@ def main():
             cc_msgs = midi.drain(now_t=t_point)
             if cc_msgs:
                 mapped_controls = {
-                    CC_WAVE_SPEED,
-                    CC_WAVE_COLOR,
-                    CC_WAVE_PHASE,
-                    CC_STARFIELD_SPEED,
-                    CC_STARFIELD_COLOR,
+                    cc_wave_speed,
+                    cc_wave_color,
+                    cc_wave_phase,
+                    cc_starfield_speed,
+                    cc_starfield_color,
                 }
                 mapped_msgs = [cc for cc in cc_msgs if cc.control in mapped_controls]
-                if mapped_msgs:
+                if args.midi_log == "all":
+                    for cc in cc_msgs:
+                        tag = "mapped" if cc.control in mapped_controls else "unmapped"
+                        print(
+                            f"[midi] {tag} t={cc.t:7.3f}s ch={cc.channel:2d} cc={cc.control:3d} val={cc.value:3d}"
+                        )
+
+                if mapped_msgs and args.midi_log != "none":
+                    unique_controls = sorted({cc.control for cc in mapped_msgs})
                     print(
-                        f"[midi] mapped CC detected ({len(mapped_msgs)} msg{'s' if len(mapped_msgs) != 1 else ''})"
+                        f"[midi] mapped CC detected ({len(mapped_msgs)} msg{'s' if len(mapped_msgs) != 1 else ''}) "
+                        f"controls={unique_controls}"
                     )
-                    for cc in mapped_msgs:
-                        print(f"[midi] t={cc.t:7.3f}s ch={cc.channel:2d} cc={cc.control:3d} val={cc.value:3d}")
+                    if args.midi_log != "all":
+                        for cc in mapped_msgs:
+                            print(f"[midi] t={cc.t:7.3f}s ch={cc.channel:2d} cc={cc.control:3d} val={cc.value:3d}")
 
                 for cc in mapped_msgs:
-                    if cc.control == CC_WAVE_COLOR:
+                    if cc.control == cc_wave_color:
                         handler = getattr(sinwave, "handle_midi_cc", None)
                         if handler is not None:
                             handler(cc)
-                    elif cc.control == CC_WAVE_SPEED:
+                            if args.midi_log != "none":
+                                print(f"[midi] wave color -> {_cc_unit(cc.value):.3f}")
+                    elif cc.control == cc_wave_speed:
                         # 0..2x
                         mult = _lerp(0.0, 2.0, _cc_unit(cc.value))
                         setter = getattr(sinwave, "set_speed_mult", None)
                         if setter is not None:
                             setter(mult)
-                            print(f"[midi] wave speed -> {mult:.3f}x")
-                    elif cc.control == CC_WAVE_PHASE:
+                            if args.midi_log != "none":
+                                print(f"[midi] wave speed -> {mult:.3f}x")
+                    elif cc.control == cc_wave_phase:
                         # 0..2π
                         import math
                         radians = _lerp(0.0, 2.0 * math.pi, _cc_unit(cc.value))
                         setter = getattr(sinwave, "set_phase_offset", None)
                         if setter is not None:
                             setter(radians)
-                            print(f"[midi] wave phase -> {radians:.3f} rad")
-                    elif cc.control == CC_STARFIELD_SPEED:
+                            if args.midi_log != "none":
+                                print(f"[midi] wave phase -> {radians:.3f} rad")
+                    elif cc.control == cc_starfield_speed:
                         # 0.5..4x
                         mult = _lerp(0.5, 4.0, _cc_unit(cc.value))
                         setter = getattr(simple_starfield, "set_speed_mult", None)
                         if setter is not None:
                             setter(mult)
-                            print(f"[midi] starfield speed -> {mult:.3f}x")
-                    elif cc.control == CC_STARFIELD_COLOR:
+                            if args.midi_log != "none":
+                                print(f"[midi] starfield speed -> {mult:.3f}x")
+                    elif cc.control == cc_starfield_color:
                         # 0..1 (white -> colored)
                         amt = _cc_unit(cc.value)
                         setter = getattr(simple_starfield, "set_color_amount", None)
                         if setter is not None:
                             setter(amt)
-                            print(f"[midi] starfield color -> {amt:.3f}")
+                            if args.midi_log != "none":
+                                print(f"[midi] starfield color -> {amt:.3f}")
 
             next_idx = int(t_point // SWITCH_SECONDS) % len(demos)
             if next_idx != active_idx:
