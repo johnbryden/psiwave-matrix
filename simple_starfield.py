@@ -10,6 +10,11 @@ from rgbmatrix import RGBMatrix, RGBMatrixOptions
 # Shape: (height, width, 3) for RGB values
 pixel_state = None
 
+# Optional module-level state so other code can call draw(canvas, matrix, t_point)
+_stars = None
+_last_t_point = None
+_is_setup = False
+
 def init_pixel_state(height, width):
     """Initialize the pixel state array"""
     global pixel_state
@@ -139,6 +144,45 @@ def draw_starfield(canvas, stars):
     for x, y, color in colors:
         # Main star
         merge_pixels(canvas, x, y, color[0], color[1], color[2], blend=False)
+
+
+def setup(matrix, num_stars=100):
+    """
+    Initialize module-level starfield state so callers can use draw().
+    Safe to call multiple times.
+    """
+    global _stars, _last_t_point, _is_setup
+    init_pixel_state(matrix.height, matrix.width)
+    _stars = create_starfield(num_stars, matrix.width, matrix.height)
+    _last_t_point = None
+    _is_setup = True
+
+
+def activate():
+    """Called when switching back to this demo (prevents a large dt jump)."""
+    global _last_t_point
+    _last_t_point = None
+
+
+def draw(canvas, matrix, t_point):
+    """
+    Draw a frame of the starfield at time t_point (seconds).
+    Caller should clear the canvas before calling if desired.
+    """
+    global _stars, _last_t_point, _is_setup
+
+    if not _is_setup or _stars is None:
+        setup(matrix)
+
+    if _last_t_point is None:
+        dt = 0.0
+    else:
+        dt = max(0.0, t_point - _last_t_point)
+    _last_t_point = t_point
+
+    clear_pixel_state()
+    update_starfield(_stars, dt, matrix.width, matrix.height)
+    draw_starfield(canvas, _stars)
 
 # --- Main execution block ---
 if __name__ == "__main__":

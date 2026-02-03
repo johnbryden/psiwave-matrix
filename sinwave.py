@@ -152,6 +152,32 @@ def draw_sine_wave(
             if y_center + w < matrix.height:
                 draw_pixels(canvas, x, y_center + w, soft_colour[0], soft_colour[1], soft_colour[2], blend=blend)
 
+
+def setup(matrix):
+    """
+    Initialize module-level pixel buffer so callers can use draw().
+    Safe to call multiple times.
+    """
+    init_pixel_state(matrix.height, matrix.width)
+
+
+def activate():
+    """Hook for demo switching (currently no-op)."""
+    return
+
+
+def draw(canvas, matrix, t_point, colour=(50, 50, 255)):
+    """
+    Draw a frame at time t_point (seconds).
+    Caller should clear the canvas before calling if desired.
+    """
+    if pixel_state is None or pixel_state.shape[0] != matrix.height or pixel_state.shape[1] != matrix.width:
+        setup(matrix)
+
+    clear_pixel_state()
+    draw_sine_wave(canvas, matrix, t_point, colour=colour, frequency=0.15, blend=False)
+    draw_vertical_bar(canvas, matrix, colour, blend=True)
+
 # --- Main execution block ---
 if __name__ == "__main__":
     options = RGBMatrixOptions()
