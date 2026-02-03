@@ -260,6 +260,15 @@ def main():
         f" (log={args.midi_log})"
     )
 
+    # If we're doing MIDI logging, also enable demo-level debug logs where available.
+    if args.midi_log != "none":
+        sf_dbg = getattr(simple_starfield, "set_debug", None)
+        if sf_dbg is not None:
+            try:
+                sf_dbg(True)
+            except Exception:
+                pass
+
     # Let each demo initialize any internal buffers/state.
     for _, demo in demos:
         if hasattr(demo, "setup"):
@@ -376,13 +385,31 @@ def main():
                         if setter is not None:
                             setter(amt)
                             if log_mapped:
-                                print(f"[midi] starfield color -> {amt:.3f}")
+                                eff = getattr(simple_starfield, "_color_amount", None)
+                                dz = getattr(simple_starfield, "_COLOR_DEADZONE", None)
+                                if isinstance(eff, (int, float)):
+                                    if isinstance(dz, (int, float)):
+                                        print(f"[midi] starfield color -> amt={amt:.3f} effective={float(eff):.3f} deadzone={float(dz):.3f}")
+                                    else:
+                                        print(f"[midi] starfield color -> amt={amt:.3f} effective={float(eff):.3f}")
+                                else:
+                                    print(f"[midi] starfield color -> amt={amt:.3f}")
                         else:
                             if hasattr(simple_starfield, "_color_amount"):
                                 try:
                                     setattr(simple_starfield, "_color_amount", float(amt))
                                     if log_mapped:
-                                        print(f"[midi] starfield color -> {amt:.3f} (compat)")
+                                        eff = getattr(simple_starfield, "_color_amount", None)
+                                        dz = getattr(simple_starfield, "_COLOR_DEADZONE", None)
+                                        if isinstance(eff, (int, float)):
+                                            if isinstance(dz, (int, float)):
+                                                print(
+                                                    f"[midi] starfield color -> amt={amt:.3f} effective={float(eff):.3f} deadzone={float(dz):.3f} (compat)"
+                                                )
+                                            else:
+                                                print(f"[midi] starfield color -> amt={amt:.3f} effective={float(eff):.3f} (compat)")
+                                        else:
+                                            print(f"[midi] starfield color -> amt={amt:.3f} (compat)")
                                 except Exception:
                                     pass
 

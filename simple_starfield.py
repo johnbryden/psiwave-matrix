@@ -4,6 +4,7 @@ import time
 import math
 import numpy as np
 import random
+import os
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
 # Global pixel state as a numpy array for fast access
@@ -20,6 +21,20 @@ _speed_mult = 1.0       # 0.5..4 typical
 _color_amount = 1.0     # 0=grayscale (no hue), 1=colored (default preserves current look)
 # Treat very small color amounts as 0 to avoid faint tint from CC jitter/rounding.
 _COLOR_DEADZONE = 0.03  # 0..1
+
+# Debug logging (disabled by default; enable with PSIWAVE_DEBUG_STARFIELD=1)
+_debug = os.environ.get("PSIWAVE_DEBUG_STARFIELD", "").strip() not in ("", "0", "false", "False", "no", "NO")
+_debug_last_draw_log_t = -1e9
+_debug_draw_log_interval_s = 1.0
+
+def set_debug(enabled: bool = True) -> None:
+    """Enable/disable starfield debug logs."""
+    global _debug
+    _debug = bool(enabled)
+
+def _dbg(msg: str) -> None:
+    if _debug:
+        print(f"[starfield] {msg}")
 
 def init_pixel_state(height, width):
     """Initialize the pixel state array"""
@@ -202,7 +217,7 @@ def set_speed_mult(mult: float) -> None:
 
 
 def set_color_amount(amount: float) -> None:
-    """Set starfield color amount (0=white, 1=colored)."""
+    """Set starfield color amount (0=grayscale/no hue, 1=colored)."""
     global _color_amount
     try:
         a = float(amount)
@@ -212,9 +227,11 @@ def set_color_amount(amount: float) -> None:
         a = 0.0
     elif a > 1.0:
         a = 1.0
+    raw = a
     if a <= _COLOR_DEADZONE:
         a = 0.0
     _color_amount = a
+    _dbg(f"set_color_amount raw={raw:.4f} deadzone={_COLOR_DEADZONE:.4f} -> {_color_amount:.4f}")
 
 
 def draw(canvas, matrix, t_point):
@@ -236,6 +253,15 @@ def draw(canvas, matrix, t_point):
     clear_pixel_state()
     update_starfield(_stars, dt, matrix.width, matrix.height)
     draw_starfield(canvas, _stars)
+
+    # Periodic debug status (rate-limited to avoid flooding the console).
+    global _debug_last_draw_log_t
+    if _debug and (t_point - _debug_last_draw_log_t) >= _debug_draw_log_interval_s:
+        _debug_last_draw_log_t = t_point
+        _dbg(
+            f"draw t={t_point:.2f}s dt={dt:.4f}s speed_mult={_speed_mult:.3f} "
+            f"color_amount={_color_amount:.3f} stars={len(_stars) if _stars is not None else 0}"
+        )
 
 # --- Main execution block ---
 if __name__ == "__main__":
