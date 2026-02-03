@@ -17,9 +17,11 @@ TARGET_FPS = 60.0
 # 1: Speed of wave (0..2x current)
 # 2: Colour of wave (existing morph)
 # 3: Phase of wave
+# 4: Wavelength of wave (1.0x .. 0.25x base)
 # 4: Speed of starfield (0.5..4x current)
 # 5: Colour of starfield (white -> coloured)
 CC_WAVE_SPEED = 102
+CC_WAVE_WAVELENGTH = 103
 CC_WAVE_COLOR = 108
 CC_WAVE_PHASE = 104
 CC_STARFIELD_SPEED = 101
@@ -221,6 +223,7 @@ def main():
         ),
     )
     ap.add_argument("--cc-wave-speed", type=int, default=CC_WAVE_SPEED, help="CC number for wave speed.")
+    ap.add_argument("--cc-wave-wavelength", type=int, default=CC_WAVE_WAVELENGTH, help="CC number for wave wavelength.")
     ap.add_argument("--cc-wave-color", type=int, default=CC_WAVE_COLOR, help="CC number for wave colour.")
     ap.add_argument("--cc-wave-phase", type=int, default=CC_WAVE_PHASE, help="CC number for wave phase.")
     ap.add_argument("--cc-starfield-speed", type=int, default=CC_STARFIELD_SPEED, help="CC number for starfield speed.")
@@ -245,6 +248,7 @@ def main():
         return n
 
     cc_wave_speed = _clamp_cc(args.cc_wave_speed)
+    cc_wave_wavelength = _clamp_cc(args.cc_wave_wavelength)
     cc_wave_color = _clamp_cc(args.cc_wave_color)
     cc_wave_phase = _clamp_cc(args.cc_wave_phase)
     cc_starfield_speed = _clamp_cc(args.cc_starfield_speed)
@@ -252,6 +256,7 @@ def main():
 
     cc_map = {
         "wave_speed": cc_wave_speed,
+        "wave_wavelength": cc_wave_wavelength,
         "wave_color": cc_wave_color,
         "wave_phase": cc_wave_phase,
         "starfield_speed": cc_starfield_speed,
@@ -265,6 +270,7 @@ def main():
     print(
         "[midi] CC map:"
         f" wave_speed={cc_wave_speed}"
+        f" wave_wavelength={cc_wave_wavelength}"
         f" wave_color={cc_wave_color}"
         f" wave_phase={cc_wave_phase}"
         f" starfield_speed={cc_starfield_speed}"
@@ -307,6 +313,7 @@ def main():
 
                 mapped_controls = {
                     cc_wave_speed,
+                    cc_wave_wavelength,
                     cc_wave_color,
                     cc_wave_phase,
                     cc_starfield_speed,
@@ -360,6 +367,23 @@ def main():
                                     setattr(sinwave, "_speed_mult", float(mult))
                                     if log_mapped:
                                         print(f"[midi] wave speed -> {mult:.3f}x (compat)")
+                                except Exception:
+                                    pass
+                    if cc.control == cc_wave_wavelength:
+                        # 1.0x at 0 .. 0.25x at 127
+                        mult = _lerp(1.0, 0.25, _cc_unit(cc.value))
+                        setter = getattr(sinwave, "set_wavelength_mult", None)
+                        if setter is not None:
+                            setter(mult)
+                            if log_mapped:
+                                print(f"[midi] wave wavelength -> {mult:.3f}x")
+                        else:
+                            # Back-compat: allow older sinwave modules by mutating module state.
+                            if hasattr(sinwave, "_wavelength_mult"):
+                                try:
+                                    setattr(sinwave, "_wavelength_mult", float(mult))
+                                    if log_mapped:
+                                        print(f"[midi] wave wavelength -> {mult:.3f}x (compat)")
                                 except Exception:
                                     pass
                     if cc.control == cc_wave_phase:

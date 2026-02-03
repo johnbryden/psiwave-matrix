@@ -15,6 +15,12 @@ _BASE_SPEED = 5.0
 _speed_mult = 1.0        # 0..2 (typical)
 _phase_offset = 0.0      # radians, 0..2π
 
+# Optional MIDI-driven wavelength control (set by main.py)
+# Wavelength is expressed in pixels-per-cycle, and converted to frequency via:
+#   sin(2π * x / wavelength + phase)
+_BASE_WAVELENGTH = 103.0  # pixels per cycle
+_wavelength_mult = 1.0    # 1.0 at CC=0 .. 0.25 at CC=127 (typical)
+
 # Motion integrator state:
 # We integrate phase as ∫(speed dt) so speed changes don't cause a phase jump.
 _phase_accum = 0.0
@@ -242,6 +248,24 @@ def set_phase_offset(radians: float) -> None:
     _phase_offset = r
 
 
+def set_wavelength_mult(mult: float) -> None:
+    """
+    Set sine-wave wavelength multiplier.
+
+    Effective wavelength (pixels/cycle) = _BASE_WAVELENGTH * mult
+    Typical mapping is 1.0 at CC=0 and 0.25 at CC=127.
+    """
+    global _wavelength_mult
+    try:
+        m = float(mult)
+    except Exception:
+        return
+    # Avoid zero/negative wavelength; keep a small floor.
+    if m < 0.01:
+        m = 0.01
+    _wavelength_mult = m
+
+
 def _lerp_color(c1, c2, t):
     """Fast-ish integer lerp between two RGB tuples."""
     return (
@@ -279,12 +303,20 @@ def draw(canvas, matrix, t_point, colour=None):
 
     speed = _BASE_SPEED * _speed_mult
     _phase_accum += speed * dt
+
+    # Convert wavelength (pixels/cycle) into the "frequency" used by draw_sine_wave's
+    # sin(frequency * x + phase). Here, frequency = 2π / wavelength.
+    wavelength_px = _BASE_WAVELENGTH * _wavelength_mult
+    if wavelength_px < 1.0:
+        wavelength_px = 1.0
+    frequency = (2.0 * math.pi) / wavelength_px
+
     draw_sine_wave(
         canvas,
         matrix,
         _phase_accum,
         colour=colour,
-        frequency=0.15,
+        frequency=frequency,
         speed=1.0,
         phase_offset=_phase_offset,
         blend=False,
