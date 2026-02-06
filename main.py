@@ -22,8 +22,8 @@ TARGET_FPS = 60.0
 # 4: Wavelength of wave (1.0x .. 0.25x base)
 # 4: Speed of starfield (0.5..4x current)
 # 5: Colour of starfield (white -> coloured)
-CC_WAVE_SPEED = -1
-CC_WAVE_WAVELENGTH = 102
+CC_WAVE_SPEED = 102
+CC_WAVE_WAVELENGTH = 103
 CC_WAVE_COLOR = 108
 CC_WAVE_PHASE = 104
 CC_STARFIELD_SPEED = 101
@@ -370,14 +370,8 @@ def main():
     ap.add_argument(
         "--midi-sync-beats-per-cycle",
         type=float,
-        default=1.0,
-        help="For speed sync: beats per full 2π cycle (1=one beat per cycle, 4=one bar in 4/4).",
-    )
-    ap.add_argument(
-        "--midi-sync-speed-mult",
-        type=float,
-        default=1.0,
-        help="Additional multiplier applied to speed-sync phase (0.5 = half speed, still clock-locked).",
+        default=2.0,
+        help="For speed sync: beats per full 2π cycle (default 2 = half-speed; 1=one beat per cycle, 4=one bar in 4/4).",
     )
     ap.add_argument(
         "--midi-sync-log",
@@ -552,11 +546,8 @@ def main():
                         beats_per_cycle = float(args.midi_sync_beats_per_cycle)
                         if beats_per_cycle <= 0.0:
                             beats_per_cycle = 1.0
-                        speed_mult = float(args.midi_sync_speed_mult)
-                        if speed_mult < 0.0:
-                            speed_mult = 0.0
                         # phase = 2π * beats / beats_per_cycle, where beats = ticks / PPQN
-                        phase = (2.0 * math.pi) * ((float(ticks) / 24.0) / beats_per_cycle) * speed_mult
+                        phase = (2.0 * math.pi) * ((float(ticks) / 24.0) / beats_per_cycle)
                         setter = getattr(sinwave, "set_external_phase", None)
                         if setter is not None:
                             try:
