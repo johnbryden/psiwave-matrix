@@ -67,6 +67,8 @@ class MidiCCIn:
         self._clock_tick_dts: List[float] = []
         self._clock_bpm: Optional[float] = None
         self._clock_start_pulse = False
+        self._clock_tick_count = 0
+        self._clock_last_dt: Optional[float] = None
 
         try:
             import rtmidi  # type: ignore
@@ -170,19 +172,25 @@ class MidiCCIn:
         self._clock_tick_dts.clear()
         self._clock_bpm = None
         self._clock_start_pulse = True
+        self._clock_tick_count = 0
+        self._clock_last_dt = None
 
     def _clock_on_stop(self) -> None:
         self._clock_running = False
         self._clock_last_tick_t = None
         self._clock_tick_dts.clear()
         self._clock_bpm = None
+        self._clock_tick_count = 0
+        self._clock_last_dt = None
 
     def _clock_on_tick(self, now_t: float) -> None:
         # Some devices send clock without Start/Continue. Treat first observed clock as "running".
         if not self._clock_running:
             self._clock_running = True
+        self._clock_tick_count += 1
         if self._clock_last_tick_t is not None:
             dt = now_t - self._clock_last_tick_t
+            self._clock_last_dt = dt
             # MIDI clock at ~20..300 BPM is tick dt ~= 0.125s .. 0.0083s.
             # Filter obvious garbage/spikes.
             if 0.002 <= dt <= 0.25:
@@ -190,7 +198,8 @@ class MidiCCIn:
                 # Keep a small rolling window for stability.
                 if len(self._clock_tick_dts) > 96:
                     del self._clock_tick_dts[:-96]
-                if len(self._clock_tick_dts) >= 12:
+                # Start estimating quickly, then stabilize with more samples.
+                if len(self._clock_tick_dts) >= 4:
                     avg_dt = sum(self._clock_tick_dts) / len(self._clock_tick_dts)
                     if avg_dt > 0:
                         bps = 1.0 / (avg_dt * float(self._clock_ppqn))
@@ -206,6 +215,10 @@ class MidiCCIn:
         sp = self._clock_start_pulse
         self._clock_start_pulse = False
         return self._clock_running, self._clock_bpm, sp
+
+    def clock_debug_state(self) -> Tuple[bool, Optional[float], int, Optional[float], int]:
+        """Returns (running, bpm, tick_count, last_dt, window_len)."""
+        return self._clock_running, self._clock_bpm, int(self._clock_tick_count), self._clock_last_dt, len(self._clock_tick_dts)
 
     def drain(self, now_t: float) -> List[MidiCC]:
         """Drain pending MIDI messages without blocking; returns CCs and updates clock state."""
@@ -265,6 +278,9 @@ class MidiCCIn:
             return out
         return out
 
+    def is_enabled(self) -> bool:
+        return self._midiin is not None
+
 
 def _build_matrix():
     # One shared matrix config for both demos.
@@ -306,9 +322,9 @@ def main():
     )
     ap.add_argument(
         "--midi-sync-log",
-        choices=("none", "bpm"),
+        choices=("none", "bpm", "clock"),
         default="none",
-        help="Log MIDI clock BPM occasionally (useful while experimenting).",
+        help="Log MIDI clock status occasionally (useful while experimenting).",
     )
     ap.add_argument(
         "--disable-cc-wave-speed",
@@ -345,6 +361,8 @@ def main():
     midi = MidiCCIn(port_query=args.midi_port)
     midi_sync_enabled = args.midi_sync != "off"
     midi_sync_target = args.midi_sync
+    if midi_sync_enabled and not midi.is_enabled():
+        print("[midi] WARNING: --midi-sync enabled but MIDI input is disabled/unavailable (no ports?).")
 
     def _clamp_cc(n: int) -> int:
         if n < 0:
@@ -464,9 +482,20 @@ def main():
                             except Exception:
                                 pass
 
-                    if args.midi_sync_log == "bpm" and (t_point - last_clock_log_t) >= 1.0:
+                    if args.midi_sync_log == "clock" and (t_point - last_clock_log_t) >= 1.0:
                         last_clock_log_t = t_point
-                        print(f"[midi] clock running bpm={float(bpm):.2f} sync={midi_sync_target}")
+                        r, b, ticks, last_dt, win = midi.clock_debug_state()
+                        bpm_s = f"{float(b):.2f}" if isinstance(b, (int, float)) else "?"
+                        dt_s = f"{float(last_dt):.4f}" if isinstance(last_dt, (int, float)) else "?"
+                        print(f"[midi] clock running={r} bpm={bpm_s} ticks={ticks} last_dt={dt_s}s win={win} sync={midi_sync_target}")
+                    elif args.midi_sync_log == "bpm" and (t_point - last_clock_log_t) >= 1.0:
+                        last_clock_log_t = t_point
+                        if isinstance(bpm, (int, float)) and bpm > 0.0:
+                            print(f"[midi] clock running bpm={float(bpm):.2f} sync={midi_sync_target}")
+                        else:
+                            r, _, ticks, _, win = midi.clock_debug_state()
+                            if r:
+                                print(f"[midi] clock running (estimating...) ticks={ticks} win={win} sync={midi_sync_target}")
             if cc_msgs:
                 log_all = args.midi_log in ("all", "both")
                 log_mapped = args.midi_log in ("mapped", "both")
