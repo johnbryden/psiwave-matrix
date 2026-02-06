@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -u
 
 import time
+import math
 import argparse
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
@@ -20,8 +21,8 @@ TARGET_FPS = 60.0
 # 4: Wavelength of wave (1.0x .. 0.25x base)
 # 4: Speed of starfield (0.5..4x current)
 # 5: Colour of starfield (white -> coloured)
-CC_WAVE_SPEED = 102
-CC_WAVE_WAVELENGTH = 103
+CC_WAVE_SPEED = -1
+CC_WAVE_WAVELENGTH = 102
 CC_WAVE_COLOR = 108
 CC_WAVE_PHASE = 104
 CC_STARFIELD_SPEED = 101
@@ -39,6 +40,43 @@ def _cc_unit(v: int) -> float:
 
 def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
+
+
+def _clamp01(x: float) -> float:
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    return float(x)
+
+
+def _sigmoid01(x: float, *, threshold: float = 0.5, steepness: float = 10.0) -> float:
+    """
+    Sigmoid curve mapping x∈[0,1] -> y∈[0,1].
+
+    - threshold: the input value where the curve crosses 0.5 (before endpoint forcing)
+    - steepness: curve sharpness; <=0 falls back to linear
+
+    Note: endpoints are forced exactly: x=0 -> 0, x=1 -> 1.
+    """
+    x = _clamp01(x)
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+
+    t = _clamp01(threshold)
+    k = float(steepness)
+    if not (k > 0.0):
+        return x
+
+    # Numerically-stable logistic.
+    z = k * (x - t)
+    if z >= 0.0:
+        ez = math.exp(-z)
+        return 1.0 / (1.0 + ez)
+    ez = math.exp(z)
+    return ez / (1.0 + ez)
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +392,18 @@ def main():
     ap.add_argument("--cc-wave-phase", type=int, default=CC_WAVE_PHASE, help="CC number for wave phase.")
     ap.add_argument("--cc-starfield-speed", type=int, default=CC_STARFIELD_SPEED, help="CC number for starfield speed.")
     ap.add_argument("--cc-starfield-color", type=int, default=CC_STARFIELD_COLOR, help="CC number for starfield colour.")
+    ap.add_argument(
+        "--starfield-color-threshold",
+        type=float,
+        default=0.50,
+        help="Sigmoid threshold for starfield color mapping (CC unit 0..1 where output is ~0.5).",
+    )
+    ap.add_argument(
+        "--starfield-color-steepness",
+        type=float,
+        default=10.0,
+        help="Sigmoid steepness for starfield color mapping (larger = sharper; <=0 disables sigmoid).",
+    )
     args = ap.parse_args()
 
     matrix = _build_matrix()
@@ -388,6 +438,9 @@ def main():
     cc_starfield_speed = _clamp_cc(args.cc_starfield_speed)
     cc_starfield_color = _clamp_cc(args.cc_starfield_color)
 
+    sf_color_threshold = _clamp01(float(args.starfield_color_threshold))
+    sf_color_steepness = float(args.starfield_color_steepness)
+
     # If we're syncing speed to MIDI clock, disable wave-speed CC to avoid fighting sources.
     cc_wave_speed_enabled = (not bool(args.disable_cc_wave_speed)) and (midi_sync_target not in ("speed", "both"))
 
@@ -414,6 +467,7 @@ def main():
         f" wave_phase={cc_wave_phase}"
         f" starfield_speed={cc_starfield_speed}"
         f" starfield_color={cc_starfield_color}"
+        f" (starfield_color_sigmoid=thr:{sf_color_threshold:.3f},k:{sf_color_steepness:.3f})"
         f" (log={args.midi_log})"
     )
     if dupes:
@@ -627,7 +681,8 @@ def main():
                                     pass
                     if cc.control == cc_starfield_color:
                         # 0..1 (white -> colored)
-                        amt = _cc_unit(cc.value)
+                        raw = _cc_unit(cc.value)
+                        amt = _sigmoid01(raw, threshold=sf_color_threshold, steepness=sf_color_steepness)
                         setter = getattr(simple_starfield, "set_color_amount", None)
                         if setter is not None:
                             setter(amt)
@@ -636,11 +691,14 @@ def main():
                                 dz = getattr(simple_starfield, "_COLOR_DEADZONE", None)
                                 if isinstance(eff, (int, float)):
                                     if isinstance(dz, (int, float)):
-                                        print(f"[midi] starfield color -> amt={amt:.3f} effective={float(eff):.3f} deadzone={float(dz):.3f}")
+                                        print(
+                                            f"[midi] starfield color -> raw={raw:.3f} amt={amt:.3f} "
+                                            f"effective={float(eff):.3f} deadzone={float(dz):.3f}"
+                                        )
                                     else:
-                                        print(f"[midi] starfield color -> amt={amt:.3f} effective={float(eff):.3f}")
+                                        print(f"[midi] starfield color -> raw={raw:.3f} amt={amt:.3f} effective={float(eff):.3f}")
                                 else:
-                                    print(f"[midi] starfield color -> amt={amt:.3f}")
+                                    print(f"[midi] starfield color -> raw={raw:.3f} amt={amt:.3f}")
                         else:
                             if hasattr(simple_starfield, "_color_amount"):
                                 try:
@@ -651,12 +709,16 @@ def main():
                                         if isinstance(eff, (int, float)):
                                             if isinstance(dz, (int, float)):
                                                 print(
-                                                    f"[midi] starfield color -> amt={amt:.3f} effective={float(eff):.3f} deadzone={float(dz):.3f} (compat)"
+                                                    f"[midi] starfield color -> raw={raw:.3f} amt={amt:.3f} "
+                                                    f"effective={float(eff):.3f} deadzone={float(dz):.3f} (compat)"
                                                 )
                                             else:
-                                                print(f"[midi] starfield color -> amt={amt:.3f} effective={float(eff):.3f} (compat)")
+                                                print(
+                                                    f"[midi] starfield color -> raw={raw:.3f} amt={amt:.3f} "
+                                                    f"effective={float(eff):.3f} (compat)"
+                                                )
                                         else:
-                                            print(f"[midi] starfield color -> amt={amt:.3f} (compat)")
+                                            print(f"[midi] starfield color -> raw={raw:.3f} amt={amt:.3f} (compat)")
                                 except Exception:
                                     pass
 

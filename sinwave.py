@@ -11,7 +11,7 @@ COLOR_2 = (255, 50, 50)
 _last_cc_value = 0  # 0-127
 
 # Optional MIDI-driven motion controls (set by main.py)
-_BASE_SPEED = 5.0
+_BASE_SPEED = 2.5
 _speed_mult = 1.0        # 0..2 (typical)
 _phase_offset = 0.0      # radians, 0..2π
 
