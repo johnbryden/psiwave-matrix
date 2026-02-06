@@ -342,6 +342,11 @@ def main():
         action="store_true",
         help="Disable the starfield demo (run only sinwave).",
     )
+    ap.add_argument(
+        "--disable-sinwave",
+        action="store_true",
+        help="Disable the sinwave demo (run only starfield).",
+    )
     ap.add_argument("--midi-port", default=None, help="MIDI input port name (substring match). Default: any.")
     ap.add_argument(
         "--midi-sync",
@@ -409,11 +414,13 @@ def main():
     matrix = _build_matrix()
     canvas = matrix.CreateFrameCanvas()
 
-    demos = [
-        ("sinwave", sinwave),
-    ]
+    demos = []
+    if not args.disable_sinwave:
+        demos.append(("sinwave", sinwave))
     if not args.disable_starfield:
         demos.insert(0, ("starfield", simple_starfield))
+    if not demos:
+        raise SystemExit("No demos enabled (did you pass both --disable-sinwave and --disable-starfield?)")
 
     midi = MidiCCIn(port_query=args.midi_port)
     midi_sync_enabled = args.midi_sync != "off"
