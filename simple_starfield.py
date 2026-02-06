@@ -140,8 +140,8 @@ class Star:
         if (self.x < 0 or self.x >= matrix_width or 
             self.y < 0 or self.y >= matrix_height):
             # Place star randomly near center
-            self.x = center_x + random.uniform(-15, 15)
-            self.y = center_y + random.uniform(-12, 12)
+            self.x = center_x + random.uniform(-8, 8)
+            self.y = center_y + random.uniform(-6, 6)
             # Treat respawns as "new stars": optionally force a shared spawn color (e.g. beat-synced).
             if _spawn_color_type is not None:
                 self.color_type = _spawn_color_type
