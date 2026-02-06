@@ -3,7 +3,7 @@
 import time
 import argparse
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
 import sinwave
@@ -52,7 +52,7 @@ class MidiCC:
 
 class MidiCCIn:
     """
-    Non-blocking MIDI CC input using `python-rtmidi` directly.
+    Non-blocking MIDI input using `python-rtmidi` directly.
 
     Default behavior is "any": first available MIDI input port, any channel.
     If MIDI isn't available, this becomes a no-op and rendering continues.
@@ -60,6 +60,13 @@ class MidiCCIn:
 
     def __init__(self, port_query: Optional[str] = None):
         self._midiin = None
+        # MIDI clock tracking (24 PPQN standard).
+        self._clock_ppqn = 24
+        self._clock_running = False
+        self._clock_last_tick_t: Optional[float] = None
+        self._clock_tick_dts: List[float] = []
+        self._clock_bpm: Optional[float] = None
+        self._clock_start_pulse = False
 
         try:
             import rtmidi  # type: ignore
@@ -79,15 +86,17 @@ class MidiCCIn:
 
         try:
             self._midiin = MidiIn()
-            # We only care about channel voice messages; ignore sysex/timing/active sense.
+            # We care about CC *and* MIDI clock; ignore sysex + active sense.
             if hasattr(self._midiin, "ignore_types"):
                 try:
                     # Most common signature (python-rtmidi): active_sense
-                    self._midiin.ignore_types(sysex=True, timing=True, active_sense=True)
+                    # IMPORTANT: timing=False so we receive MIDI clock (0xF8) + start/stop/continue.
+                    self._midiin.ignore_types(sysex=True, timing=False, active_sense=True)
                 except TypeError:
                     # Older builds sometimes use different names or only positional args.
                     try:
-                        self._midiin.ignore_types(True, True, True)
+                        # Positional order is typically: sysex, timing, active_sense.
+                        self._midiin.ignore_types(True, False, True)
                     except Exception:
                         pass
         except Exception as e:
@@ -153,10 +162,53 @@ class MidiCCIn:
             return
 
         port_name = ports[chosen_idx]
-        print(f"[midi] listening on '{port_name}', any channel (CC only)")
+        print(f"[midi] listening on '{port_name}', any channel (CC + clock)")
+
+    def _clock_on_start(self) -> None:
+        self._clock_running = True
+        self._clock_last_tick_t = None
+        self._clock_tick_dts.clear()
+        self._clock_bpm = None
+        self._clock_start_pulse = True
+
+    def _clock_on_stop(self) -> None:
+        self._clock_running = False
+        self._clock_last_tick_t = None
+        self._clock_tick_dts.clear()
+        self._clock_bpm = None
+
+    def _clock_on_tick(self, now_t: float) -> None:
+        # Some devices send clock without Start/Continue. Treat first observed clock as "running".
+        if not self._clock_running:
+            self._clock_running = True
+        if self._clock_last_tick_t is not None:
+            dt = now_t - self._clock_last_tick_t
+            # MIDI clock at ~20..300 BPM is tick dt ~= 0.125s .. 0.0083s.
+            # Filter obvious garbage/spikes.
+            if 0.002 <= dt <= 0.25:
+                self._clock_tick_dts.append(dt)
+                # Keep a small rolling window for stability.
+                if len(self._clock_tick_dts) > 96:
+                    del self._clock_tick_dts[:-96]
+                if len(self._clock_tick_dts) >= 12:
+                    avg_dt = sum(self._clock_tick_dts) / len(self._clock_tick_dts)
+                    if avg_dt > 0:
+                        bps = 1.0 / (avg_dt * float(self._clock_ppqn))
+                        self._clock_bpm = 60.0 * bps
+        self._clock_last_tick_t = now_t
+
+    def clock_state(self) -> Tuple[bool, Optional[float], bool]:
+        """
+        Returns (running, bpm, start_pulse).
+
+        start_pulse is True exactly once right after receiving MIDI Start (0xFA).
+        """
+        sp = self._clock_start_pulse
+        self._clock_start_pulse = False
+        return self._clock_running, self._clock_bpm, sp
 
     def drain(self, now_t: float) -> List[MidiCC]:
-        """Drain pending CC messages without blocking."""
+        """Drain pending MIDI messages without blocking; returns CCs and updates clock state."""
         if self._midiin is None:
             return []
 
@@ -168,10 +220,31 @@ class MidiCCIn:
                 if not msg:
                     break
                 data = msg[0]
-                if not data or len(data) < 3:
+                if not data or len(data) < 1:
                     continue
 
-                status = int(data[0])
+                status = int(data[0]) & 0xFF
+
+                # --- System real-time messages (single-byte, can occur anywhere) ---
+                if status == 0xF8:  # MIDI Clock
+                    self._clock_on_tick(now_t=now_t)
+                    continue
+                if status == 0xFA:  # Start
+                    self._clock_on_start()
+                    continue
+                if status == 0xFB:  # Continue
+                    self._clock_running = True
+                    continue
+                if status == 0xFC:  # Stop
+                    self._clock_on_stop()
+                    continue
+                if status >= 0xF8:
+                    # Active sense (0xFE) and other real-time: ignore.
+                    continue
+
+                # --- Channel voice messages (need at least 3 bytes) ---
+                if len(data) < 3:
+                    continue
                 msg_type = status & 0xF0
                 ch = (status & 0x0F) + 1  # 1-16
 
@@ -212,6 +285,37 @@ def main():
     ap = argparse.ArgumentParser(description="psiwave-matrix demos")
     ap.add_argument("--midi-port", default=None, help="MIDI input port name (substring match). Default: any.")
     ap.add_argument(
+        "--midi-sync",
+        choices=("off", "wavelength", "speed", "both"),
+        default="off",
+        help=(
+            "Sync wave parameters to MIDI clock. "
+            "'wavelength' maps BPM to wavelength multiplier; "
+            "'speed' maps BPM to animation speed (beat-locked); "
+            "'both' applies both; 'off' disables."
+        ),
+    )
+    ap.add_argument("--midi-sync-ref-bpm", type=float, default=120.0, help="Reference BPM for wavelength mapping (ref/bpm).")
+    ap.add_argument("--midi-sync-wavelength-min", type=float, default=0.25, help="Min wavelength multiplier when syncing.")
+    ap.add_argument("--midi-sync-wavelength-max", type=float, default=2.00, help="Max wavelength multiplier when syncing.")
+    ap.add_argument(
+        "--midi-sync-beats-per-cycle",
+        type=float,
+        default=1.0,
+        help="For speed sync: beats per full 2π cycle (1=one beat per cycle, 4=one bar in 4/4).",
+    )
+    ap.add_argument(
+        "--midi-sync-log",
+        choices=("none", "bpm"),
+        default="none",
+        help="Log MIDI clock BPM occasionally (useful while experimenting).",
+    )
+    ap.add_argument(
+        "--disable-cc-wave-speed",
+        action="store_true",
+        help="Disable the wave-speed CC mapping (useful when MIDI-syncing speed).",
+    )
+    ap.add_argument(
         "--midi-log",
         choices=("mapped", "all", "both", "none"),
         default="none",
@@ -239,6 +343,8 @@ def main():
     ]
 
     midi = MidiCCIn(port_query=args.midi_port)
+    midi_sync_enabled = args.midi_sync != "off"
+    midi_sync_target = args.midi_sync
 
     def _clamp_cc(n: int) -> int:
         if n < 0:
@@ -254,8 +360,11 @@ def main():
     cc_starfield_speed = _clamp_cc(args.cc_starfield_speed)
     cc_starfield_color = _clamp_cc(args.cc_starfield_color)
 
+    # If we're syncing speed to MIDI clock, disable wave-speed CC to avoid fighting sources.
+    cc_wave_speed_enabled = (not bool(args.disable_cc_wave_speed)) and (midi_sync_target not in ("speed", "both"))
+
     cc_map = {
-        "wave_speed": cc_wave_speed,
+        "wave_speed": cc_wave_speed if cc_wave_speed_enabled else None,
         "wave_wavelength": cc_wave_wavelength,
         "wave_color": cc_wave_color,
         "wave_phase": cc_wave_phase,
@@ -264,12 +373,14 @@ def main():
     }
     by_cc = {}
     for name, n in cc_map.items():
+        if n is None:
+            continue
         by_cc.setdefault(n, []).append(name)
     dupes = {n: names for n, names in by_cc.items() if len(names) > 1}
 
     print(
         "[midi] CC map:"
-        f" wave_speed={cc_wave_speed}"
+        f" wave_speed={'disabled' if not cc_wave_speed_enabled else cc_wave_speed}"
         f" wave_wavelength={cc_wave_wavelength}"
         f" wave_color={cc_wave_color}"
         f" wave_phase={cc_wave_phase}"
@@ -301,24 +412,74 @@ def main():
     print(f"Starting demo: {demos[active_idx][0]} (switch every {SWITCH_SECONDS:.0f}s). Press CTRL-C to stop.")
 
     try:
+        last_clock_log_t = -1e9
         while True:
             frame_start = time.time()
             t_point = frame_start - start_time
 
             # Drain MIDI CC messages and route mapped controls.
             cc_msgs = midi.drain(now_t=t_point)
+
+            # MIDI clock -> wave sync (optional).
+            if midi_sync_enabled:
+                running, bpm, start_pulse = midi.clock_state()
+                if start_pulse:
+                    # Align the wave on MIDI Start so the beat feels "locked".
+                    try:
+                        sinwave.activate()
+                    except Exception:
+                        pass
+                if running and isinstance(bpm, (int, float)) and bpm > 0.0:
+                    # Apply wavelength sync (maps tempo to spatial wavelength multiplier).
+                    if midi_sync_target in ("wavelength", "both"):
+                        ref = float(args.midi_sync_ref_bpm) if args.midi_sync_ref_bpm > 0 else 120.0
+                        mult = ref / float(bpm)
+                        if mult < float(args.midi_sync_wavelength_min):
+                            mult = float(args.midi_sync_wavelength_min)
+                        if mult > float(args.midi_sync_wavelength_max):
+                            mult = float(args.midi_sync_wavelength_max)
+                        setter = getattr(sinwave, "set_wavelength_mult", None)
+                        if setter is not None:
+                            try:
+                                setter(mult)
+                            except Exception:
+                                pass
+
+                    # Apply speed sync (maps tempo to phase speed: 2π per N beats).
+                    if midi_sync_target in ("speed", "both"):
+                        import math
+
+                        beats_per_cycle = float(args.midi_sync_beats_per_cycle)
+                        if beats_per_cycle <= 0.0:
+                            beats_per_cycle = 1.0
+                        desired_speed = (2.0 * math.pi) * (float(bpm) / 60.0) / beats_per_cycle
+                        base_speed = float(getattr(sinwave, "_BASE_SPEED", 5.0))
+                        if base_speed <= 0.0:
+                            base_speed = 5.0
+                        mult = desired_speed / base_speed
+                        setter = getattr(sinwave, "set_speed_mult", None)
+                        if setter is not None:
+                            try:
+                                setter(mult)
+                            except Exception:
+                                pass
+
+                    if args.midi_sync_log == "bpm" and (t_point - last_clock_log_t) >= 1.0:
+                        last_clock_log_t = t_point
+                        print(f"[midi] clock running bpm={float(bpm):.2f} sync={midi_sync_target}")
             if cc_msgs:
                 log_all = args.midi_log in ("all", "both")
                 log_mapped = args.midi_log in ("mapped", "both")
 
                 mapped_controls = {
-                    cc_wave_speed,
                     cc_wave_wavelength,
                     cc_wave_color,
                     cc_wave_phase,
                     cc_starfield_speed,
                     cc_starfield_color,
                 }
+                if cc_wave_speed_enabled:
+                    mapped_controls.add(cc_wave_speed)
                 mapped_msgs = [cc for cc in cc_msgs if cc.control in mapped_controls]
                 if log_all:
                     for cc in cc_msgs:
@@ -352,7 +513,7 @@ def main():
                                 handler(cc)
                                 if log_mapped:
                                     print(f"[midi] wave color -> {_cc_unit(cc.value):.3f}")
-                    if cc.control == cc_wave_speed:
+                    if cc_wave_speed_enabled and cc.control == cc_wave_speed:
                         # 0..2x
                         mult = _lerp(0.0, 2.0, _cc_unit(cc.value))
                         setter = getattr(sinwave, "set_speed_mult", None)
