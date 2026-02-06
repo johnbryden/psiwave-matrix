@@ -374,6 +374,12 @@ def main():
         help="For speed sync: beats per full 2π cycle (1=one beat per cycle, 4=one bar in 4/4).",
     )
     ap.add_argument(
+        "--midi-sync-speed-mult",
+        type=float,
+        default=1.0,
+        help="Additional multiplier applied to speed-sync phase (0.5 = half speed, still clock-locked).",
+    )
+    ap.add_argument(
         "--midi-sync-log",
         choices=("none", "bpm", "clock"),
         default="none",
@@ -546,8 +552,11 @@ def main():
                         beats_per_cycle = float(args.midi_sync_beats_per_cycle)
                         if beats_per_cycle <= 0.0:
                             beats_per_cycle = 1.0
+                        speed_mult = float(args.midi_sync_speed_mult)
+                        if speed_mult < 0.0:
+                            speed_mult = 0.0
                         # phase = 2π * beats / beats_per_cycle, where beats = ticks / PPQN
-                        phase = (2.0 * math.pi) * ((float(ticks) / 24.0) / beats_per_cycle)
+                        phase = (2.0 * math.pi) * ((float(ticks) / 24.0) / beats_per_cycle) * speed_mult
                         setter = getattr(sinwave, "set_external_phase", None)
                         if setter is not None:
                             try:
