@@ -22,8 +22,8 @@ TARGET_FPS = 60.0
 # 4: Wavelength of wave (1.0x .. 0.25x base)
 # 4: Speed of starfield (0.5..4x current)
 # 5: Colour of starfield (white -> coloured)
-CC_WAVE_SPEED = 102
-CC_WAVE_WAVELENGTH = 103
+CC_WAVE_SPEED = -1
+CC_WAVE_WAVELENGTH = 102
 CC_WAVE_COLOR = 108
 CC_WAVE_PHASE = 104
 CC_STARFIELD_SPEED = 101
