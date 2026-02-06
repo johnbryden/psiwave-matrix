@@ -674,7 +674,6 @@ def main():
                                     pass
                     if cc.control == cc_wave_phase:
                         # 0..2π
-                        import math
                         radians = _lerp(0.0, 2.0 * math.pi, _cc_unit(cc.value))
                         setter = getattr(sinwave, "set_phase_offset", None)
                         if setter is not None:
