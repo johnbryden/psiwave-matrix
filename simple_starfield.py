@@ -22,6 +22,10 @@ _color_amount = 1.0     # 0=grayscale (no hue), 1=colored (default preserves cur
 # Treat very small color amounts as 0 to avoid faint tint from CC jitter/rounding.
 _COLOR_DEADZONE = 0.03  # 0..1
 
+# Star color palette + optional beat-synced spawn override.
+_STAR_COLOR_PALETTE = ("white", "blue", "cyan", "yellow", "orange", "red")
+_spawn_color_type = None  # None or a palette entry (str)
+
 # Debug logging (disabled by default; enable with PSIWAVE_DEBUG_STARFIELD=1)
 _debug = os.environ.get("PSIWAVE_DEBUG_STARFIELD", "").strip() not in ("", "0", "false", "False", "no", "NO")
 _debug_last_draw_log_t = -1e9
@@ -35,6 +39,27 @@ def set_debug(enabled: bool = True) -> None:
 def _dbg(msg: str) -> None:
     if _debug:
         print(f"[starfield] {msg}")
+
+def set_spawn_color_type(color_type) -> None:
+    """
+    Set the color_type assigned to newly-spawned stars (i.e. stars that respawn off-screen).
+
+    When set to a valid palette entry, all respawns will use that color until changed.
+    Set to None to disable the override (respawns become random again).
+    """
+    global _spawn_color_type
+    if color_type is None:
+        if _spawn_color_type is not None:
+            _spawn_color_type = None
+            _dbg("spawn_color_type cleared")
+        return
+
+    ct = str(color_type)
+    if ct not in _STAR_COLOR_PALETTE:
+        return
+    if ct != _spawn_color_type:
+        _spawn_color_type = ct
+        _dbg(f"spawn_color_type -> {ct}")
 
 def init_pixel_state(height, width):
     """Initialize the pixel state array"""
@@ -90,7 +115,7 @@ class Star:
         self.twinkle_phase = random.uniform(0, 2 * math.pi)
         
         # Add color variety to stars
-        self.color_type = random.choice(['white', 'blue', 'cyan', 'yellow', 'orange', 'red'])
+        self.color_type = random.choice(_STAR_COLOR_PALETTE)
         
     def update(self, dt, matrix_width, matrix_height):
         """Update star position and twinkling - optimized for speed"""
@@ -117,6 +142,11 @@ class Star:
             # Place star randomly near center
             self.x = center_x + random.uniform(-15, 15)
             self.y = center_y + random.uniform(-12, 12)
+            # Treat respawns as "new stars": optionally force a shared spawn color (e.g. beat-synced).
+            if _spawn_color_type is not None:
+                self.color_type = _spawn_color_type
+            else:
+                self.color_type = random.choice(_STAR_COLOR_PALETTE)
             
         # Update twinkling less frequently for speed
         self.twinkle_phase += self.twinkle_speed * 0.5

@@ -2,6 +2,7 @@
 
 import time
 import math
+import random
 import argparse
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
@@ -27,6 +28,9 @@ CC_WAVE_COLOR = 108
 CC_WAVE_PHASE = 104
 CC_STARFIELD_SPEED = 101
 CC_STARFIELD_COLOR = 102
+
+# Beat-synced starfield spawn palette (kept consistent with simple_starfield.py).
+_STARFIELD_SPAWN_PALETTE = ("white", "blue", "cyan", "yellow", "orange", "red")
 
 
 def _cc_unit(v: int) -> float:
@@ -502,6 +506,7 @@ def main():
 
     try:
         last_clock_log_t = -1e9
+        last_beat_index = None
         while True:
             frame_start = time.time()
             t_point = frame_start - start_time
@@ -518,12 +523,26 @@ def main():
                         sinwave.activate()
                     except Exception:
                         pass
+                    # Re-lock beat detection on transport start.
+                    last_beat_index = None
                 if running:
+                    # Use MIDI clock ticks for both wave sync and beat-synced star respawn coloring.
+                    _, _, ticks, _, _ = midi.clock_debug_state()
+
+                    # Beat edge detection (24 PPQN -> one quarter-note beat every 24 ticks).
+                    beat_index = int(ticks) // 24
+                    if beat_index != last_beat_index:
+                        last_beat_index = beat_index
+                        new_color = random.choice(_STARFIELD_SPAWN_PALETTE)
+                        setter = getattr(simple_starfield, "set_spawn_color_type", None)
+                        if setter is not None:
+                            try:
+                                setter(new_color)
+                            except Exception:
+                                pass
+
                     # Speed sync: hard-lock phase to MIDI clock tick count (no drift).
                     if midi_sync_target in ("speed", "both"):
-                        import math
-
-                        _, _, ticks, _, _ = midi.clock_debug_state()
                         beats_per_cycle = float(args.midi_sync_beats_per_cycle)
                         if beats_per_cycle <= 0.0:
                             beats_per_cycle = 1.0
