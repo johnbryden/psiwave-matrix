@@ -299,16 +299,22 @@ def _build_matrix():
 
 def main():
     ap = argparse.ArgumentParser(description="psiwave-matrix demos")
+    ap.add_argument(
+        "--disable-starfield",
+        action="store_true",
+        help="Disable the starfield demo (run only sinwave).",
+    )
     ap.add_argument("--midi-port", default=None, help="MIDI input port name (substring match). Default: any.")
     ap.add_argument(
         "--midi-sync",
-        choices=("off", "wavelength", "speed", "both"),
+        choices=("off", "wavelength", "speed", "spatial", "both"),
         default="off",
         help=(
             "Sync wave parameters to MIDI clock. "
-            "'wavelength' maps BPM to wavelength multiplier; "
-            "'speed' maps BPM to animation speed (beat-locked); "
-            "'both' applies both; 'off' disables."
+            "'speed' beat-locks animation phase to clock; "
+            "'wavelength' is an alias for 'speed' (does NOT change spatial wavelength); "
+            "'spatial' maps BPM to spatial wavelength multiplier; "
+            "'both' applies speed+spatial; 'off' disables."
         ),
     )
     ap.add_argument("--midi-sync-ref-bpm", type=float, default=120.0, help="Reference BPM for wavelength mapping (ref/bpm).")
@@ -354,13 +360,17 @@ def main():
     canvas = matrix.CreateFrameCanvas()
 
     demos = [
-        ("starfield", simple_starfield),
         ("sinwave", sinwave),
     ]
+    if not args.disable_starfield:
+        demos.insert(0, ("starfield", simple_starfield))
 
     midi = MidiCCIn(port_query=args.midi_port)
     midi_sync_enabled = args.midi_sync != "off"
     midi_sync_target = args.midi_sync
+    if midi_sync_target == "wavelength":
+        # Historical naming: user often means time-period "wavelength" (beat-locked), not spatial wavelength.
+        midi_sync_target = "speed"
     if midi_sync_enabled and not midi.is_enabled():
         print("[midi] WARNING: --midi-sync enabled but MIDI input is disabled/unavailable (no ports?).")
 
@@ -447,9 +457,26 @@ def main():
                         sinwave.activate()
                     except Exception:
                         pass
-                if running and isinstance(bpm, (int, float)) and bpm > 0.0:
-                    # Apply wavelength sync (maps tempo to spatial wavelength multiplier).
-                    if midi_sync_target in ("wavelength", "both"):
+                if running:
+                    # Speed sync: hard-lock phase to MIDI clock tick count (no drift).
+                    if midi_sync_target in ("speed", "both"):
+                        import math
+
+                        _, _, ticks, _, _ = midi.clock_debug_state()
+                        beats_per_cycle = float(args.midi_sync_beats_per_cycle)
+                        if beats_per_cycle <= 0.0:
+                            beats_per_cycle = 1.0
+                        # phase = 2π * beats / beats_per_cycle, where beats = ticks / PPQN
+                        phase = (2.0 * math.pi) * ((float(ticks) / 24.0) / beats_per_cycle)
+                        setter = getattr(sinwave, "set_external_phase", None)
+                        if setter is not None:
+                            try:
+                                setter(phase)
+                            except Exception:
+                                pass
+
+                    # Spatial wavelength sync: maps tempo to spatial wavelength multiplier (optional).
+                    if midi_sync_target in ("spatial", "both") and isinstance(bpm, (int, float)) and bpm > 0.0:
                         ref = float(args.midi_sync_ref_bpm) if args.midi_sync_ref_bpm > 0 else 120.0
                         mult = ref / float(bpm)
                         if mult < float(args.midi_sync_wavelength_min):
@@ -462,25 +489,14 @@ def main():
                                 setter(mult)
                             except Exception:
                                 pass
-
-                    # Apply speed sync (maps tempo to phase speed: 2π per N beats).
-                    if midi_sync_target in ("speed", "both"):
-                        import math
-
-                        beats_per_cycle = float(args.midi_sync_beats_per_cycle)
-                        if beats_per_cycle <= 0.0:
-                            beats_per_cycle = 1.0
-                        desired_speed = (2.0 * math.pi) * (float(bpm) / 60.0) / beats_per_cycle
-                        base_speed = float(getattr(sinwave, "_BASE_SPEED", 5.0))
-                        if base_speed <= 0.0:
-                            base_speed = 5.0
-                        mult = desired_speed / base_speed
-                        setter = getattr(sinwave, "set_speed_mult", None)
-                        if setter is not None:
-                            try:
-                                setter(mult)
-                            except Exception:
-                                pass
+                else:
+                    # When clock isn't running, release external phase so the wave returns to internal integration.
+                    setter = getattr(sinwave, "set_external_phase", None)
+                    if setter is not None:
+                        try:
+                            setter(None)
+                        except Exception:
+                            pass
 
                     if args.midi_sync_log == "clock" and (t_point - last_clock_log_t) >= 1.0:
                         last_clock_log_t = t_point

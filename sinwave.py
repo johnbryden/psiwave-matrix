@@ -30,6 +30,7 @@ _wavelength_mult = 1.0    # 1.0 at CC=0 .. 0.25 at CC=127
 _phase_accum = 0.0
 _last_t_point = None  # type: float | None
 _MAX_DT = 0.10  # seconds; clamp to avoid huge jumps after stalls/switches
+_external_phase = None  # type: float | None  # when set, overrides internal phase integrator (for MIDI clock sync)
 
 # Global pixel state as a numpy array for fast access
 # Shape: (height, width, 3) for RGB values
@@ -190,9 +191,10 @@ def setup(matrix):
 
 def activate():
     """Hook for demo switching; reset motion integrator for continuity."""
-    global _phase_accum, _last_t_point
+    global _phase_accum, _last_t_point, _external_phase
     _phase_accum = 0.0
     _last_t_point = None
+    _external_phase = None
 
 
 def handle_midi_cc(cc):
@@ -252,6 +254,25 @@ def set_phase_offset(radians: float) -> None:
     _phase_offset = r
 
 
+def set_external_phase(phase: float | None) -> None:
+    """
+    Override the internal phase integrator.
+
+    When set, draw() will use this as the wave phase directly (radians-ish domain),
+    which is useful for hard-locking visuals to MIDI clock ticks.
+    """
+    global _external_phase, _last_t_point
+    if phase is None:
+        _external_phase = None
+        # Reset integrator timing so returning to internal integration doesn't jump.
+        _last_t_point = None
+        return
+    try:
+        _external_phase = float(phase)
+    except Exception:
+        return
+
+
 def set_wavelength_mult(mult: float) -> None:
     """
     Set sine-wave wavelength multiplier.
@@ -293,20 +314,25 @@ def draw(canvas, matrix, t_point, colour=None):
         colour = _lerp_color(COLOR_1, COLOR_2, morph)
 
     clear_pixel_state()
-    # Integrate phase over time so changing speed doesn't "teleport" the wave.
-    global _phase_accum, _last_t_point
-    if _last_t_point is None:
-        dt = 0.0
-    else:
-        dt = t_point - _last_t_point
-        if dt < 0.0:
+    # Integrate phase over time so changing speed doesn't "teleport" the wave,
+    # unless an external phase source (e.g. MIDI clock) is driving it.
+    global _phase_accum, _last_t_point, _external_phase
+    if _external_phase is None:
+        if _last_t_point is None:
             dt = 0.0
-        elif dt > _MAX_DT:
-            dt = _MAX_DT
-    _last_t_point = t_point
+        else:
+            dt = t_point - _last_t_point
+            if dt < 0.0:
+                dt = 0.0
+            elif dt > _MAX_DT:
+                dt = _MAX_DT
+        _last_t_point = t_point
 
-    speed = _BASE_SPEED * _speed_mult
-    _phase_accum += speed * dt
+        speed = _BASE_SPEED * _speed_mult
+        _phase_accum += speed * dt
+        phase_for_draw = _phase_accum
+    else:
+        phase_for_draw = _external_phase
     denom = _wavelength_mult
     if denom < 0.0001:
         denom = 0.0001
@@ -315,7 +341,7 @@ def draw(canvas, matrix, t_point, colour=None):
     draw_sine_wave(
         canvas,
         matrix,
-        _phase_accum,
+        phase_for_draw,
         colour=colour,
         frequency=frequency,
         speed=1.0,
