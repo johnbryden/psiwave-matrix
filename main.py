@@ -6,10 +6,10 @@ import random
 import argparse
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
-from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
 import sinwave
 import simple_starfield
+import multi_sinwaves
 
 
 SWITCH_SECONDS = 30.0
@@ -83,13 +83,23 @@ def _sigmoid01(x: float, *, threshold: float = 0.5, steepness: float = 10.0) -> 
     return ez / (1.0 + ez)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class MidiCC:
     """Minimal representation of a MIDI Control Change message."""
     channel: int  # 1-16
     control: int  # 0-127
     value: int    # 0-127
     t: float      # seconds (relative to program start)
+
+
+@dataclass(frozen=True)
+class MidiNote:
+    """Minimal representation of a MIDI NoteOn/NoteOff message."""
+    channel: int    # 1-16
+    note: int       # 0-127
+    velocity: int   # 0-127
+    is_on: bool     # True for NoteOn (vel>0), False for NoteOff (or NoteOn vel=0)
+    t: float        # seconds (relative to program start)
 
 
 class MidiCCIn:
@@ -111,6 +121,8 @@ class MidiCCIn:
         self._clock_start_pulse = False
         self._clock_tick_count = 0
         self._clock_last_dt: Optional[float] = None
+        # Note event queue (drained by caller).
+        self._note_queue: List[MidiNote] = []
 
         try:
             import rtmidi  # type: ignore
@@ -303,6 +315,23 @@ class MidiCCIn:
                 msg_type = status & 0xF0
                 ch = (status & 0x0F) + 1  # 1-16
 
+                # NoteOn/NoteOff
+                # - NoteOn: 0x90..0x9F (velocity=0 is treated as NoteOff)
+                # - NoteOff: 0x80..0x8F
+                if msg_type == 0x90 or msg_type == 0x80:
+                    note = int(data[1]) & 0x7F
+                    vel = int(data[2]) & 0x7F
+                    is_on = (msg_type == 0x90) and (vel > 0)
+                    self._note_queue.append(
+                        MidiNote(
+                            channel=ch,
+                            note=note,
+                            velocity=vel,
+                            is_on=is_on,
+                            t=now_t,
+                        )
+                    )
+
                 # Control Change = 0xB0..0xBF
                 if msg_type != 0xB0:
                     continue
@@ -320,11 +349,25 @@ class MidiCCIn:
             return out
         return out
 
+    def drain_notes(self) -> List[MidiNote]:
+        """
+        Drain queued MIDI note events (NoteOn/NoteOff) without blocking.
+
+        This is separate from `drain()` so existing CC call sites remain unchanged.
+        """
+        if not self._note_queue:
+            return []
+        out = self._note_queue
+        self._note_queue = []
+        return out
+
     def is_enabled(self) -> bool:
         return self._midiin is not None
 
 
 def _build_matrix():
+    from rgbmatrix import RGBMatrix, RGBMatrixOptions
+
     # One shared matrix config for both demos.
     options = RGBMatrixOptions()
     options.rows = 40
@@ -339,17 +382,23 @@ def _build_matrix():
     return RGBMatrix(options=options)
 
 
-def main():
+def get_parser():
     ap = argparse.ArgumentParser(description="psiwave-matrix demos")
-    ap.add_argument(
-        "--disable-starfield",
+    demo_group = ap.add_mutually_exclusive_group()
+    demo_group.add_argument(
+        "--solo-starfield",
         action="store_true",
-        help="Disable the starfield demo (run only sinwave).",
+        help="Run only the starfield demo.",
     )
-    ap.add_argument(
-        "--disable-sinwave",
+    demo_group.add_argument(
+        "--solo-sinwave",
         action="store_true",
-        help="Disable the sinwave demo (run only starfield).",
+        help="Run only the sinwave demo.",
+    )
+    demo_group.add_argument(
+        "--solo-multi-sinwaves",
+        action="store_true",
+        help="Run only the multi-sinwaves demo (12 stacked layers, MIDI note highlight).",
     )
     ap.add_argument("--midi-port", default=None, help="MIDI input port name (substring match). Default: any.")
     ap.add_argument(
@@ -380,9 +429,14 @@ def main():
         help="Log MIDI clock status occasionally (useful while experimenting).",
     )
     ap.add_argument(
-        "--disable-cc-wave-speed",
-        action="store_true",
-        help="Disable the wave-speed CC mapping (useful when MIDI-syncing speed).",
+        "--wave-speed-cc-mapping",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "Wave-speed CC mapping mode. "
+            "'auto' (default) disables wave-speed CC while --midi-sync is 'speed' or 'both'; "
+            "'on' forces it on; 'off' forces it off."
+        ),
     )
     ap.add_argument(
         "--midi-log",
@@ -413,18 +467,23 @@ def main():
         default=10.0,
         help="Sigmoid steepness for starfield color mapping (larger = sharper; <=0 disables sigmoid).",
     )
-    args = ap.parse_args()
+    return ap
 
-    matrix = _build_matrix()
+
+def run(args, matrix):
     canvas = matrix.CreateFrameCanvas()
 
     demos = []
-    if not args.disable_sinwave:
+    if bool(getattr(args, "solo_multi_sinwaves", False)):
+        demos.append(("multi_sinwaves", multi_sinwaves))
+    elif bool(getattr(args, "solo_sinwave", False)):
         demos.append(("sinwave", sinwave))
-    if not args.disable_starfield:
-        demos.insert(0, ("starfield", simple_starfield))
-    if not demos:
-        raise SystemExit("No demos enabled (did you pass both --disable-sinwave and --disable-starfield?)")
+    elif bool(getattr(args, "solo_starfield", False)):
+        demos.append(("starfield", simple_starfield))
+    else:
+        demos.append(("starfield", simple_starfield))
+        demos.append(("sinwave", sinwave))
+        demos.append(("multi_sinwaves", multi_sinwaves))
 
     midi = MidiCCIn(port_query=args.midi_port)
     midi_sync_enabled = args.midi_sync != "off"
@@ -452,8 +511,17 @@ def main():
     sf_color_threshold = _clamp01(float(args.starfield_color_threshold))
     sf_color_steepness = float(args.starfield_color_steepness)
 
-    # If we're syncing speed to MIDI clock, disable wave-speed CC to avoid fighting sources.
-    cc_wave_speed_enabled = (not bool(args.disable_cc_wave_speed)) and (midi_sync_target not in ("speed", "both"))
+    # If we're syncing speed to MIDI clock, default to disabling wave-speed CC to avoid fighting sources.
+    wave_speed_cc_mode = str(getattr(args, "wave_speed_cc_mapping", "auto")).lower()
+    if wave_speed_cc_mode not in ("auto", "on", "off"):
+        wave_speed_cc_mode = "auto"
+    auto_enabled = midi_sync_target not in ("speed", "both")
+    if wave_speed_cc_mode == "on":
+        cc_wave_speed_enabled = True
+    elif wave_speed_cc_mode == "off":
+        cc_wave_speed_enabled = False
+    else:
+        cc_wave_speed_enabled = bool(auto_enabled)
 
     cc_map = {
         "wave_speed": cc_wave_speed if cc_wave_speed_enabled else None,
@@ -472,7 +540,7 @@ def main():
 
     print(
         "[midi] CC map:"
-        f" wave_speed={'disabled' if not cc_wave_speed_enabled else cc_wave_speed}"
+        f" wave_speed={'off' if not cc_wave_speed_enabled else cc_wave_speed}"
         f" wave_wavelength={cc_wave_wavelength}"
         f" wave_color={cc_wave_color}"
         f" wave_phase={cc_wave_phase}"
@@ -513,6 +581,30 @@ def main():
 
             # Drain MIDI CC messages and route mapped controls.
             cc_msgs = midi.drain(now_t=t_point)
+            note_msgs = midi.drain_notes()
+            if note_msgs:
+                active_demo = demos[active_idx][1]
+                handler = getattr(active_demo, "handle_midi_note", None)
+                if handler is not None:
+                    for n in note_msgs:
+                        try:
+                            handler(n)
+                        except Exception:
+                            pass
+                else:
+                    handler_on = getattr(active_demo, "handle_midi_note_on", None)
+                    handler_off = getattr(active_demo, "handle_midi_note_off", None)
+                    if handler_on is not None or handler_off is not None:
+                        for n in note_msgs:
+                            try:
+                                if n.is_on:
+                                    if handler_on is not None:
+                                        handler_on(n)
+                                else:
+                                    if handler_off is not None:
+                                        handler_off(n)
+                            except Exception:
+                                pass
 
             # MIDI clock -> wave sync (optional).
             if midi_sync_enabled:
@@ -765,6 +857,19 @@ def main():
     except KeyboardInterrupt:
         print("\nExiting...")
         matrix.Clear()
+    except Exception as e:
+        if type(e).__name__ == "ScreenClosed":
+            print("\nDisplay closed.")
+        else:
+            raise
+        matrix.Clear()
+
+
+def main():
+    ap = get_parser()
+    args = ap.parse_args()
+    matrix = _build_matrix()
+    run(args, matrix)
 
 
 if __name__ == "__main__":

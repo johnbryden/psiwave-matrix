@@ -2,8 +2,9 @@
 
 import time
 import math
+from typing import Optional
+
 import numpy as np
-from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
 # MIDI-driven color morph (defaults)
 COLOR_1 = (50, 50, 255)
@@ -254,7 +255,7 @@ def set_phase_offset(radians: float) -> None:
     _phase_offset = r
 
 
-def set_external_phase(phase: float | None) -> None:
+def set_external_phase(phase: Optional[float]) -> None:
     """
     Override the internal phase integrator.
 
@@ -352,6 +353,8 @@ def draw(canvas, matrix, t_point, colour=None):
 
 # --- Main execution block ---
 if __name__ == "__main__":
+    from rgbmatrix import RGBMatrix, RGBMatrixOptions
+
     options = RGBMatrixOptions()
     options.rows = 40
     options.cols = 80

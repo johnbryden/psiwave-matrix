@@ -2,10 +2,11 @@
 
 import time
 import math
-import numpy as np
-import random
 import os
-from rgbmatrix import RGBMatrix, RGBMatrixOptions
+import random
+from typing import Tuple
+
+import numpy as np
 
 # Global pixel state as a numpy array for fast access
 # Shape: (height, width, 3) for RGB values
@@ -25,6 +26,16 @@ _COLOR_DEADZONE = 0.03  # 0..1
 # Star color palette + optional beat-synced spawn override.
 _STAR_COLOR_PALETTE = ("white", "blue", "cyan", "yellow", "orange", "red")
 _spawn_color_type = None  # None or a palette entry (str)
+
+# Avoid spawning stars right on the center pixel (looks odd and can "stick" due
+# to the tiny-delta movement guard in Star.update()).
+# Can be overridden with PSIWAVE_STARFIELD_CENTER_CLEAR_PX, in pixels.
+try:
+    _CENTER_CLEAR_RADIUS_PX = float(os.environ.get("PSIWAVE_STARFIELD_CENTER_CLEAR_PX", "2.0"))
+except Exception:
+    _CENTER_CLEAR_RADIUS_PX = 2.0
+if _CENTER_CLEAR_RADIUS_PX < 0.0:
+    _CENTER_CLEAR_RADIUS_PX = 0.0
 
 # Debug logging (disabled by default; enable with PSIWAVE_DEBUG_STARFIELD=1)
 _debug = os.environ.get("PSIWAVE_DEBUG_STARFIELD", "").strip() not in ("", "0", "false", "False", "no", "NO")
@@ -102,13 +113,39 @@ def clear_pixel_state():
     if pixel_state is not None:
         pixel_state.fill(0)
 
+def _spawn_near_center(matrix_width: int, matrix_height: int, *, x_span: float, y_span: float) -> Tuple[float, float]:
+    """
+    Spawn a point near the center, but not *too* close to it.
+
+    This prevents occasional spawns exactly on the center pixel, which is visually
+    distracting and can also result in a star that barely moves.
+    """
+    center_x = matrix_width / 2
+    center_y = matrix_height / 2
+
+    # Scale the exclusion radius mildly with panel size, but keep a sensible floor.
+    r_min = max(_CENTER_CLEAR_RADIUS_PX, 0.03 * min(matrix_width, matrix_height))
+    r2_min = r_min * r_min
+
+    # Try a few random samples first.
+    for _ in range(32):
+        x = center_x + random.uniform(-x_span, x_span)
+        y = center_y + random.uniform(-y_span, y_span)
+        dx = x - center_x
+        dy = y - center_y
+        if (dx * dx + dy * dy) >= r2_min:
+            return (x, y)
+
+    # Fallback: put it on the exclusion circle at a random angle.
+    a = random.uniform(0.0, 2.0 * math.pi)
+    x = center_x + math.cos(a) * r_min
+    y = center_y + math.sin(a) * r_min
+    return (x, y)
+
 class Star:
     def __init__(self, matrix_width, matrix_height):
         # Start stars near center
-        center_x = matrix_width / 2
-        center_y = matrix_height / 2
-        self.x = center_x + random.uniform(-15, 15)
-        self.y = center_y + random.uniform(-12, 12)
+        self.x, self.y = _spawn_near_center(matrix_width, matrix_height, x_span=15, y_span=12)
         self.brightness = random.randint(50, 255)
         self.speed = random.uniform(1.5, 4.0)  # Increased speeds for faster movement
         self.twinkle_speed = random.uniform(0.02, 0.08)
@@ -140,8 +177,7 @@ class Star:
         if (self.x < 0 or self.x >= matrix_width or 
             self.y < 0 or self.y >= matrix_height):
             # Place star randomly near center
-            self.x = center_x + random.uniform(-8, 8)
-            self.y = center_y + random.uniform(-6, 6)
+            self.x, self.y = _spawn_near_center(matrix_width, matrix_height, x_span=8, y_span=6)
             # Treat respawns as "new stars": optionally force a shared spawn color (e.g. beat-synced).
             if _spawn_color_type is not None:
                 self.color_type = _spawn_color_type
@@ -295,6 +331,8 @@ def draw(canvas, matrix, t_point):
 
 # --- Main execution block ---
 if __name__ == "__main__":
+    from rgbmatrix import RGBMatrix, RGBMatrixOptions
+
     options = RGBMatrixOptions()
     options.rows = 40
     options.cols = 80
