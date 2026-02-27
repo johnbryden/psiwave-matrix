@@ -1,5 +1,6 @@
 #!/usr/bin/env -S python3 -u
 
+import sys
 import time
 import math
 import random
@@ -10,6 +11,7 @@ from typing import Optional, List, Tuple
 import sinwave
 import simple_starfield
 import multi_sinwaves
+import text_scroll
 
 
 SWITCH_SECONDS = 30.0
@@ -28,6 +30,8 @@ CC_WAVE_COLOR = 108
 CC_WAVE_PHASE = 104
 CC_STARFIELD_SPEED = 101
 CC_STARFIELD_COLOR = 102
+CC_TEXT_SPEED = 101
+CC_TEXT_COLOR = 102
 
 # Beat-synced starfield spawn palette (kept consistent with simple_starfield.py).
 _STARFIELD_SPAWN_PALETTE = ("white", "blue", "cyan", "yellow", "orange", "red")
@@ -110,7 +114,7 @@ class MidiCCIn:
     If MIDI isn't available, this becomes a no-op and rendering continues.
     """
 
-    def __init__(self, port_query: Optional[str] = None):
+    def __init__(self, port_query: Optional[str] = None, use_windows_mm: bool = False):
         self._midiin = None
         # MIDI clock tracking (24 PPQN standard).
         self._clock_ppqn = 24
@@ -140,8 +144,19 @@ class MidiCCIn:
             )
             return
 
+        # When use_windows_mm is True (e.g. from main_screen on Windows), force Windows MM API
+        # so virtual ports like loopMIDI are enumerated.
+        midi_kwargs = {}
+        if use_windows_mm:
+            api = getattr(rtmidi, "API_WINDOWS_MM", None)
+            get_apis = getattr(rtmidi, "get_compiled_api", None)
+            if api is not None and get_apis is not None and callable(get_apis) and api in get_apis():
+                midi_kwargs["rtapi"] = api
+
         try:
-            self._midiin = MidiIn()
+            self._midiin = MidiIn(**midi_kwargs) if midi_kwargs else MidiIn()
+            if midi_kwargs:
+                print("[midi] using Windows MM API for port enumeration (e.g. loopMIDI)")
             # We care about CC *and* MIDI clock; ignore sysex + active sense.
             if hasattr(self._midiin, "ignore_types"):
                 try:
@@ -160,14 +175,30 @@ class MidiCCIn:
             self._midiin = None
             return
 
-        try:
-            ports = list(self._midiin.get_ports())
-        except Exception as e:
-            print(f"[midi] disabled (could not list MIDI input ports): {e}")
+        # Virtual drivers (e.g. loopMIDI) can register slightly late; retry a few times on Windows.
+        ports = []
+        last_error = None
+        for attempt in range(4):
+            try:
+                ports = list(self._midiin.get_ports())
+                if ports:
+                    break
+            except Exception as e:
+                last_error = e
+            if not ports and attempt < 3:
+                time.sleep(0.6 if attempt < 2 else 1.0)
+
+        if last_error is not None and not ports:
+            print(f"[midi] disabled (could not list MIDI input ports): {last_error}")
             ports = []
 
         if not ports:
             print("[midi] disabled (no MIDI input ports found)")
+            if sys.platform == "win32":
+                apis = getattr(rtmidi, "get_compiled_api", None)
+                if callable(apis):
+                    print(f"[midi] compiled APIs: {apis()}")
+                print("[midi] Ensure loopMIDI (or your device) is running and ports exist. Use main_screen.py on Windows for virtual port support.")
             self._midiin = None
             return
 
@@ -400,6 +431,11 @@ def get_parser():
         action="store_true",
         help="Run only the multi-sinwaves demo (12 stacked layers, MIDI note highlight).",
     )
+    demo_group.add_argument(
+        "--solo-text-scroll",
+        action="store_true",
+        help="Run only the text scroll demo (scrolling text, CC for speed/colour).",
+    )
     ap.add_argument("--midi-port", default=None, help="MIDI input port name (substring match). Default: any.")
     ap.add_argument(
         "--midi-sync",
@@ -449,12 +485,23 @@ def get_parser():
             "'both' logs all CCs AND the mapped summaries/derived changes."
         ),
     )
+    ap.add_argument(
+        "--midi-note-log",
+        choices=("none", "all"),
+        default="none",
+        help=(
+            "MIDI note logging mode. 'none' (default) disables note logs; "
+            "'all' logs every NoteOn/NoteOff received."
+        ),
+    )
     ap.add_argument("--cc-wave-speed", type=int, default=CC_WAVE_SPEED, help="CC number for wave speed.")
     ap.add_argument("--cc-wave-wavelength", type=int, default=CC_WAVE_WAVELENGTH, help="CC number for wave wavelength.")
     ap.add_argument("--cc-wave-color", type=int, default=CC_WAVE_COLOR, help="CC number for wave colour.")
     ap.add_argument("--cc-wave-phase", type=int, default=CC_WAVE_PHASE, help="CC number for wave phase.")
     ap.add_argument("--cc-starfield-speed", type=int, default=CC_STARFIELD_SPEED, help="CC number for starfield speed.")
     ap.add_argument("--cc-starfield-color", type=int, default=CC_STARFIELD_COLOR, help="CC number for starfield colour.")
+    ap.add_argument("--cc-text-speed", type=int, default=CC_TEXT_SPEED, help="CC number for text scroll speed.")
+    ap.add_argument("--cc-text-color", type=int, default=CC_TEXT_COLOR, help="CC number for text colour (0=white, 127=hue cycle).")
     ap.add_argument(
         "--starfield-color-threshold",
         type=float,
@@ -467,10 +514,16 @@ def get_parser():
         default=10.0,
         help="Sigmoid steepness for starfield color mapping (larger = sharper; <=0 disables sigmoid).",
     )
+    ap.add_argument(
+        "--target-fps",
+        type=float,
+        default=TARGET_FPS,
+        help="Target frame rate cap. Use 0 or a negative value for uncapped rendering.",
+    )
     return ap
 
 
-def run(args, matrix):
+def run(args, matrix, use_windows_mm_midi: bool = False):
     canvas = matrix.CreateFrameCanvas()
 
     demos = []
@@ -480,12 +533,15 @@ def run(args, matrix):
         demos.append(("sinwave", sinwave))
     elif bool(getattr(args, "solo_starfield", False)):
         demos.append(("starfield", simple_starfield))
+    elif bool(getattr(args, "solo_text_scroll", False)):
+        demos.append(("text_scroll", text_scroll))
     else:
         demos.append(("starfield", simple_starfield))
         demos.append(("sinwave", sinwave))
         demos.append(("multi_sinwaves", multi_sinwaves))
+        demos.append(("text_scroll", text_scroll))
 
-    midi = MidiCCIn(port_query=args.midi_port)
+    midi = MidiCCIn(port_query=args.midi_port, use_windows_mm=use_windows_mm_midi)
     midi_sync_enabled = args.midi_sync != "off"
     midi_sync_target = args.midi_sync
     if midi_sync_target == "wavelength":
@@ -507,6 +563,8 @@ def run(args, matrix):
     cc_wave_phase = _clamp_cc(args.cc_wave_phase)
     cc_starfield_speed = _clamp_cc(args.cc_starfield_speed)
     cc_starfield_color = _clamp_cc(args.cc_starfield_color)
+    cc_text_speed = _clamp_cc(args.cc_text_speed)
+    cc_text_color = _clamp_cc(args.cc_text_color)
 
     sf_color_threshold = _clamp01(float(args.starfield_color_threshold))
     sf_color_steepness = float(args.starfield_color_steepness)
@@ -530,6 +588,8 @@ def run(args, matrix):
         "wave_phase": cc_wave_phase,
         "starfield_speed": cc_starfield_speed,
         "starfield_color": cc_starfield_color,
+        "text_speed": cc_text_speed,
+        "text_color": cc_text_color,
     }
     by_cc = {}
     for name, n in cc_map.items():
@@ -546,8 +606,11 @@ def run(args, matrix):
         f" wave_phase={cc_wave_phase}"
         f" starfield_speed={cc_starfield_speed}"
         f" starfield_color={cc_starfield_color}"
+        f" text_speed={cc_text_speed}"
+        f" text_color={cc_text_color}"
         f" (starfield_color_sigmoid=thr:{sf_color_threshold:.3f},k:{sf_color_steepness:.3f})"
         f" (log={args.midi_log})"
+        f" (note_log={args.midi_note_log})"
     )
     if dupes:
         pretty = ", ".join([f"cc={n}: {names}" for n, names in sorted(dupes.items())])
@@ -567,6 +630,7 @@ def run(args, matrix):
         if hasattr(demo, "setup"):
             demo.setup(matrix)
 
+    target_fps = float(getattr(args, "target_fps", TARGET_FPS))
     start_time = time.time()
     active_idx = 0
     demos[active_idx][1].activate()
@@ -583,6 +647,18 @@ def run(args, matrix):
             cc_msgs = midi.drain(now_t=t_point)
             note_msgs = midi.drain_notes()
             if note_msgs:
+                if args.midi_note_log == "all":
+                    for n in note_msgs:
+                        state = "on" if bool(getattr(n, "is_on", False)) else "off"
+                        note = int(getattr(n, "note", -1))
+                        vel = int(getattr(n, "velocity", 0))
+                        ch = int(getattr(n, "channel", 0))
+                        pc = note % 12 if 0 <= note <= 127 else -1
+                        print(
+                            f"[midi] note t={getattr(n, 't', t_point):7.3f}s "
+                            f"ch={ch:2d} note={note:3d} vel={vel:3d} "
+                            f"pc={pc:2d} state={state}"
+                        )
                 active_demo = demos[active_idx][1]
                 handler = getattr(active_demo, "handle_midi_note", None)
                 if handler is not None:
@@ -633,6 +709,15 @@ def run(args, matrix):
                             except Exception:
                                 pass
 
+                    # Text scroll: advance scroll phase with beats (8 pixels per beat).
+                    text_scroll_phase_px = (float(ticks) / 24.0) * 8.0
+                    setter = getattr(text_scroll, "set_scroll_phase", None)
+                    if setter is not None:
+                        try:
+                            setter(text_scroll_phase_px)
+                        except Exception:
+                            pass
+
                     # Speed sync: hard-lock phase to MIDI clock tick count (no drift).
                     if midi_sync_target in ("speed", "both"):
                         beats_per_cycle = float(args.midi_sync_beats_per_cycle)
@@ -669,6 +754,13 @@ def run(args, matrix):
                             setter(None)
                         except Exception:
                             pass
+                    # Text scroll: use time-based scroll again.
+                    setter = getattr(text_scroll, "set_scroll_phase", None)
+                    if setter is not None:
+                        try:
+                            setter(None)
+                        except Exception:
+                            pass
 
                     if args.midi_sync_log == "clock" and (t_point - last_clock_log_t) >= 1.0:
                         last_clock_log_t = t_point
@@ -694,6 +786,8 @@ def run(args, matrix):
                     cc_wave_phase,
                     cc_starfield_speed,
                     cc_starfield_color,
+                    cc_text_speed,
+                    cc_text_color,
                 }
                 if cc_wave_speed_enabled:
                     mapped_controls.add(cc_wave_speed)
@@ -838,6 +932,20 @@ def run(args, matrix):
                                             print(f"[midi] starfield color -> raw={raw:.3f} amt={amt:.3f} (compat)")
                                 except Exception:
                                     pass
+                    if cc.control == cc_text_speed:
+                        # 0.5..2x scroll speed
+                        mult = _lerp(0.5, 2.0, _cc_unit(cc.value))
+                        setter = getattr(text_scroll, "set_speed_mult", None)
+                        if setter is not None:
+                            setter(mult)
+                            if log_mapped:
+                                print(f"[midi] text scroll speed -> {mult:.3f}x")
+                    if cc.control == cc_text_color:
+                        setter = getattr(text_scroll, "set_color_cc_value", None)
+                        if setter is not None:
+                            setter(cc.value)
+                            if log_mapped:
+                                print(f"[midi] text colour -> {_cc_unit(cc.value):.3f}")
 
             next_idx = int(t_point // SWITCH_SECONDS) % len(demos)
             if next_idx != active_idx:
@@ -849,10 +957,11 @@ def run(args, matrix):
             demos[active_idx][1].draw(canvas, matrix, t_point)
             canvas = matrix.SwapOnVSync(canvas)
 
-            frame_budget = 1.0 / TARGET_FPS
-            elapsed = time.time() - frame_start
-            if elapsed < frame_budget:
-                time.sleep(frame_budget - elapsed)
+            if target_fps > 0.0:
+                frame_budget = 1.0 / target_fps
+                elapsed = time.time() - frame_start
+                if elapsed < frame_budget:
+                    time.sleep(frame_budget - elapsed)
 
     except KeyboardInterrupt:
         print("\nExiting...")

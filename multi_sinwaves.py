@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -u
 
 import math
+import random
 from dataclasses import dataclass
 from typing import List
 
@@ -61,16 +62,35 @@ class MidiNote:
 
 _held_pc_counts: List[int] = [0] * N_LAYERS
 _last_matrix_size: tuple[int, int] | None = None
+_layer_drift: List[tuple[float, float, float, float]] = [(0.0, 0.0, 0.0, 0.0)] * N_LAYERS
+
+
+def _reset_layer_drift() -> None:
+    global _layer_drift
+    # Per-layer random offsets keep motion organic while remaining subtle.
+    _layer_drift = []
+    for i in range(N_LAYERS):
+        rng = random.Random((i + 1) * 15485863)
+        _layer_drift.append(
+            (
+                rng.uniform(-0.35, 0.35),  # phase offset
+                rng.uniform(0.08, 0.24),   # drift speed
+                rng.uniform(0.03, 0.09),   # freq1 modulation depth
+                rng.uniform(0.02, 0.06),   # freq2 modulation depth
+            )
+        )
 
 
 def setup(matrix) -> None:
     global _last_matrix_size
     _last_matrix_size = (int(matrix.width), int(matrix.height))
+    _reset_layer_drift()
 
 
 def activate() -> None:
     global _held_pc_counts
     _held_pc_counts = [0] * N_LAYERS
+    _reset_layer_drift()
 
 
 def handle_midi_note(note_msg) -> None:
@@ -124,9 +144,12 @@ def draw(canvas, matrix, t_point: float, colour=None) -> None:
 
     # Animation speeds (phase domain).
     speed1 = 2.6
-    speed2 = 1.2
+    speed2 = 1.6
+    center_x = 0.5 * float(w - 1)
+    # Back layers keep full-screen coverage, but their peak positions converge toward center.
+    min_perspective_scale = 0.28
 
-    for i in range(N_LAYERS):
+    for i in range(N_LAYERS - 1, -1, -1):
         d = 0.0 if N_LAYERS <= 1 else (i / (N_LAYERS - 1))
 
         # Perspective distribution: exponent < 1 => more layers nearer the top.
@@ -136,31 +159,43 @@ def draw(canvas, matrix, t_point: float, colour=None) -> None:
         freq1 = base_freq * _lerp(1.0, top_freq_mult, d)
         amp1 = base_amp * _lerp(1.0, top_amp_mult, d)
 
-        # Second wave for undulation: smaller amplitude and slower drift.
-        freq2 = freq1 * 0.55
-        amp2 = amp1 * 0.35
+        # Second wave is higher-frequency so the ripple reads on LED pixels.
+        freq2 = freq1 * 2.2
+        amp2 = amp1 * 0.22
 
         phase_layer = d * 1.7
-        phase1 = (t_point * speed1) + phase_layer
-        phase2 = (t_point * speed2) - (phase_layer * 0.6)
+        drift_phase, drift_speed, drift_f1, drift_f2 = _layer_drift[i]
+        drift = math.sin((t_point * drift_speed) + drift_phase)
+        freq1 *= (1.0 + (drift_f1 * drift))
+        freq2 *= (1.0 - (drift_f2 * drift))
+        phase1 = (t_point * speed1) + phase_layer + (0.25 * drift)
+        phase2 = (t_point * speed2) - (phase_layer * 0.6) - (0.15 * drift)
 
         highlighted = _held_pc_counts[i] > 0
         if highlighted:
             rgb = _PALETTE[i]
         else:
-            # Depth dimming: top layers are dimmer.
-            dim = _lerp(0.95, 0.18, d)
+            # Keep non-held layers much dimmer so held notes pop clearly.
+            dim = _lerp(0.22, 0.05, d)
             rgb = _scale_color(_PALETTE[i], dim)
 
         r, g, b = rgb
         if r == 0 and g == 0 and b == 0:
             continue
 
-        for x in range(w):
-            y = y_base + (amp1 * math.sin(freq1 * x + phase1)) + (amp2 * math.sin(freq2 * x + phase2))
+        # Project horizontal sampling toward a vanishing point while still drawing full width.
+        perspective_scale = _lerp(1.0, min_perspective_scale, d)
+        inv_scale = 1.0 / perspective_scale
+        for x_screen in range(w):
+            x_projected = center_x + ((float(x_screen) - center_x) * inv_scale)
+            y = y_base + (
+                amp1 * math.sin((freq1 * x_projected) + phase1)
+            ) + (
+                amp2 * math.sin((freq2 * x_projected) + phase2)
+            )
             yi = int(round(y))
             if 0 <= yi < h:
-                canvas.SetPixel(x, yi, r, g, b)
+                canvas.SetPixel(x_screen, yi, r, g, b)
 
 
 if __name__ == "__main__":

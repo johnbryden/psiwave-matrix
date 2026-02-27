@@ -48,7 +48,7 @@ def _configure_wsl_display() -> None:
 
 
 class ScreenClosed(Exception):
-    """Raised when the user closes the display window or presses Escape."""
+    """Raised when the user closes the display window or presses q/Escape."""
 
 
 class ScreenCanvas:
@@ -99,8 +99,14 @@ class ScreenMatrix:
         self._screen = None
         self._frame_surface = None
         self._closed = False
+        self._fullscreen = False
+        self._windowed_size = (self._win_w, self._win_h)
         self._frame_count = 0
         self._last_dbg_t = -1.0
+        self._font = None
+        self._last_frame_t = time.monotonic()
+        self._fps_display = 0.0
+        self._render_ms_display = 0.0
         if _DEBUG:
             _dbg("Debug enabled (PSIWAVE_DEBUG_SCREEN=1)")
         self._init_display()
@@ -157,6 +163,10 @@ class ScreenMatrix:
         # A stable intermediate surface avoids some driver/compositor quirks (notably WSLg/XWayland).
         # We blit the numpy RGB buffer into this, then scale/blit to the display.
         self._frame_surface = self._pygame.Surface((self._width, self._height))
+        try:
+            self._font = self._pygame.font.SysFont("Arial", 18)
+        except Exception:
+            self._font = self._pygame.font.Font(None, 18)
 
         if _DEBUG:
             _dbg("--- display init ---")
@@ -202,14 +212,24 @@ class ScreenMatrix:
         for event in self._pygame.event.get():
             if event.type == self._pygame.QUIT:
                 self._closed = True
-            if event.type == self._pygame.KEYDOWN and event.key == self._pygame.K_ESCAPE:
+            if event.type == self._pygame.KEYDOWN and event.key in (self._pygame.K_ESCAPE, self._pygame.K_q):
                 self._closed = True
+            if event.type == self._pygame.KEYDOWN and event.key == self._pygame.K_f:
+                self._fullscreen = not self._fullscreen
+                if self._fullscreen:
+                    self._screen = self._pygame.display.set_mode((0, 0), self._pygame.FULLSCREEN)
+                    self._win_w, self._win_h = self._screen.get_size()
+                else:
+                    self._screen = self._pygame.display.set_mode(self._windowed_size)
+                    self._win_w, self._win_h = self._windowed_size
         if self._closed:
             raise ScreenClosed("Display window was closed")
 
         # Blit buffer to window (scaled). Pygame expects (width, height) and RGB.
         buf = canvas._buffer  # (height, width, 3)
         arr = buf.transpose(1, 0, 2)  # (width, height, 3)
+
+        render_start = time.perf_counter()
 
         # Primary path: write pixels into a stable intermediate surface, then scale.
         # This avoids a class of "blank/transparent window" issues seen with make_surface()
@@ -231,6 +251,25 @@ class ScreenMatrix:
             if self._scale != 1:
                 surf = self._pygame.transform.scale(surf, (self._win_w, self._win_h))
             self._screen.blit(surf, (0, 0))
+
+        render_ms = (time.perf_counter() - render_start) * 1000.0
+        self._render_ms_display = (
+            render_ms if self._render_ms_display <= 0.0 else (self._render_ms_display * 0.9 + render_ms * 0.1)
+        )
+
+        # FPS and render-time overlay in a simple clean font at the top-right.
+        if self._font is not None:
+            now = time.monotonic()
+            dt = max(now - self._last_frame_t, 1e-6)
+            self._last_frame_t = now
+            current_fps = 1.0 / dt
+            self._fps_display = current_fps if self._fps_display <= 0.0 else (self._fps_display * 0.9 + current_fps * 0.1)
+            fps_text = self._font.render(f"{self._fps_display:5.1f} FPS", True, (230, 230, 230))
+            text_rect = fps_text.get_rect(topright=(self._win_w - 8, 8))
+            self._screen.blit(fps_text, text_rect)
+            ms_text = self._font.render(f"{self._render_ms_display:5.2f} ms", True, (230, 230, 230))
+            ms_rect = ms_text.get_rect(topright=(self._win_w - 8, text_rect.bottom + 4))
+            self._screen.blit(ms_text, ms_rect)
 
         self._pygame.display.flip()
 

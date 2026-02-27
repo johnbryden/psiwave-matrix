@@ -1,0 +1,12 @@
+# For Raspberry Pi (LED matrix). Run with: python main.py
+# Install the RGB matrix library from source first:
+#   https://github.com/hzeller/rpi-rgb-led-matrix (build C++ lib, then binding/python)
+
+numpy>=1.20.0
+python-rtmidi>=1.5.0
+Pillow>=9.0.0
+
+# MIDI on Windows: prebuilt wheels exist only for Python 3.8–3.12. If you're on 3.13+
+# and pip tries to build from source, either:
+#   - Use a venv with Python 3.11 or 3.12 (recommended), or
+#   - Install "Visual Studio Build Tools" with C++ workload so the build can succeed.
