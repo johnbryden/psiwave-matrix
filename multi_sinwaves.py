@@ -1,15 +1,18 @@
 #!/usr/bin/env -S python3 -u
 
+from __future__ import annotations
+
 import math
 import random
-from dataclasses import dataclass
-from typing import List
+from typing import List, Optional, Tuple
+
+from effect import Effect, Param
+from midi import MidiNote
 
 
 N_LAYERS = 12
 
-# Fixed 12-color palette (layer index == pitch class == note % 12)
-_PALETTE: List[tuple[int, int, int]] = [
+_PALETTE: List[Tuple[int, int, int]] = [
     (255, 40, 40),    # 0
     (255, 140, 0),    # 1
     (255, 220, 0),    # 2
@@ -37,7 +40,7 @@ def _clamp01(x: float) -> float:
     return float(x)
 
 
-def _scale_color(rgb: tuple[int, int, int], s: float) -> tuple[int, int, int]:
+def _scale_color(rgb: Tuple[int, int, int], s: float) -> Tuple[int, int, int]:
     if s <= 0.0:
         return (0, 0, 0)
     if s >= 1.0:
@@ -46,160 +49,125 @@ def _scale_color(rgb: tuple[int, int, int], s: float) -> tuple[int, int, int]:
     return (int(r * s), int(g * s), int(b * s))
 
 
-@dataclass(frozen=True, slots=True)
-class MidiNote:
+class MultiSinwavesEffect(Effect):
     """
-    Local mirror of main.MidiNote shape so this module can be imported standalone.
-    main.py will pass its MidiNote instances; we only require compatible attributes.
+    12 stacked sinewave layers with MIDI note highlighting.
+
+    Layer index == pitch class (note % 12). Held notes highlight their layer.
+    No CC parameters -- driven purely by MIDI notes.
     """
 
-    channel: int
-    note: int
-    velocity: int
-    is_on: bool
-    t: float
+    def __init__(self, width: int, height: int):
+        super().__init__(width, height)
+        self._held_pc_counts: List[int] = [0] * N_LAYERS
+        self._last_matrix_size: Optional[Tuple[int, int]] = None
+        self._layer_drift: List[Tuple[float, float, float, float]] = [(0.0, 0.0, 0.0, 0.0)] * N_LAYERS
 
+    def _reset_layer_drift(self) -> None:
+        self._layer_drift = []
+        for i in range(N_LAYERS):
+            rng = random.Random((i + 1) * 15485863)
+            self._layer_drift.append((
+                rng.uniform(-0.35, 0.35),
+                rng.uniform(0.08, 0.24),
+                rng.uniform(0.03, 0.09),
+                rng.uniform(0.02, 0.06),
+            ))
 
-_held_pc_counts: List[int] = [0] * N_LAYERS
-_last_matrix_size: tuple[int, int] | None = None
-_layer_drift: List[tuple[float, float, float, float]] = [(0.0, 0.0, 0.0, 0.0)] * N_LAYERS
+    def setup(self, matrix) -> None:
+        self.width = int(matrix.width)
+        self.height = int(matrix.height)
+        self._last_matrix_size = (self.width, self.height)
+        self._reset_layer_drift()
 
+    def activate(self) -> None:
+        self._held_pc_counts = [0] * N_LAYERS
+        self._reset_layer_drift()
 
-def _reset_layer_drift() -> None:
-    global _layer_drift
-    # Per-layer random offsets keep motion organic while remaining subtle.
-    _layer_drift = []
-    for i in range(N_LAYERS):
-        rng = random.Random((i + 1) * 15485863)
-        _layer_drift.append(
-            (
-                rng.uniform(-0.35, 0.35),  # phase offset
-                rng.uniform(0.08, 0.24),   # drift speed
-                rng.uniform(0.03, 0.09),   # freq1 modulation depth
-                rng.uniform(0.02, 0.06),   # freq2 modulation depth
-            )
-        )
-
-
-def setup(matrix) -> None:
-    global _last_matrix_size
-    _last_matrix_size = (int(matrix.width), int(matrix.height))
-    _reset_layer_drift()
-
-
-def activate() -> None:
-    global _held_pc_counts
-    _held_pc_counts = [0] * N_LAYERS
-    _reset_layer_drift()
-
-
-def handle_midi_note(note_msg) -> None:
-    """
-    Handle MIDI note events from main.py.
-
-    Mapping: layer_index = note % 12 (pitch class).
-    Behavior: highlight any pitch class currently held (supports chords and octave stacking).
-    """
-    global _held_pc_counts
-    try:
-        n = int(getattr(note_msg, "note", -1))
-        is_on = bool(getattr(note_msg, "is_on", False))
-    except Exception:
-        return
-    if not (0 <= n <= 127):
-        return
-    pc = n % N_LAYERS
-    if is_on:
-        _held_pc_counts[pc] = int(_held_pc_counts[pc]) + 1
-    else:
-        c = int(_held_pc_counts[pc]) - 1
-        if c < 0:
-            c = 0
-        _held_pc_counts[pc] = c
-
-
-def draw(canvas, matrix, t_point: float, colour=None) -> None:
-    """
-    Render 12 stacked 1-pixel sinewave layers across the display width.
-
-    - Higher layers: dimmer + shorter wavelength + smaller amplitude (perspective)
-    - Undulation: second sine wave added on top of the first
-    - Highlight: any held pitch class (note % 12) draws at full palette color
-    """
-    global _last_matrix_size
-    w = int(matrix.width)
-    h = int(matrix.height)
-    if _last_matrix_size != (w, h):
-        setup(matrix)
-
-    # Vertical placement (perspective): cluster more layers toward the top.
-    y_bottom = h - 2
-    y_top = max(1, h // 8)
-
-    # Base wave parameters tuned for 80x40-ish matrices.
-    base_freq = 0.12
-    top_freq_mult = 2.8
-    base_amp = max(1.0, h * 0.11)      # ~4.4 at h=40
-    top_amp_mult = 0.35
-
-    # Animation speeds (phase domain).
-    speed1 = 2.6
-    speed2 = 1.6
-    center_x = 0.5 * float(w - 1)
-    # Back layers keep full-screen coverage, but their peak positions converge toward center.
-    min_perspective_scale = 0.28
-
-    for i in range(N_LAYERS - 1, -1, -1):
-        d = 0.0 if N_LAYERS <= 1 else (i / (N_LAYERS - 1))
-
-        # Perspective distribution: exponent < 1 => more layers nearer the top.
-        t = d ** 0.6
-        y_base = _lerp(float(y_bottom), float(y_top), t)
-
-        freq1 = base_freq * _lerp(1.0, top_freq_mult, d)
-        amp1 = base_amp * _lerp(1.0, top_amp_mult, d)
-
-        # Second wave is higher-frequency so the ripple reads on LED pixels.
-        freq2 = freq1 * 2.2
-        amp2 = amp1 * 0.22
-
-        phase_layer = d * 1.7
-        drift_phase, drift_speed, drift_f1, drift_f2 = _layer_drift[i]
-        drift = math.sin((t_point * drift_speed) + drift_phase)
-        freq1 *= (1.0 + (drift_f1 * drift))
-        freq2 *= (1.0 - (drift_f2 * drift))
-        phase1 = (t_point * speed1) + phase_layer + (0.25 * drift)
-        phase2 = (t_point * speed2) - (phase_layer * 0.6) - (0.15 * drift)
-
-        highlighted = _held_pc_counts[i] > 0
-        if highlighted:
-            rgb = _PALETTE[i]
+    def handle_note(self, note: MidiNote) -> None:
+        try:
+            n = int(getattr(note, "note", -1))
+            is_on = bool(getattr(note, "is_on", False))
+        except Exception:
+            return
+        if not (0 <= n <= 127):
+            return
+        pc = n % N_LAYERS
+        if is_on:
+            self._held_pc_counts[pc] += 1
         else:
-            # Keep non-held layers much dimmer so held notes pop clearly.
-            dim = _lerp(0.22, 0.05, d)
-            rgb = _scale_color(_PALETTE[i], dim)
+            c = self._held_pc_counts[pc] - 1
+            if c < 0:
+                c = 0
+            self._held_pc_counts[pc] = c
 
-        r, g, b = rgb
-        if r == 0 and g == 0 and b == 0:
-            continue
+    def draw(self, canvas, matrix, t_point: float, colour=None) -> None:
+        w = int(matrix.width)
+        h = int(matrix.height)
+        if self._last_matrix_size != (w, h):
+            self.setup(matrix)
 
-        # Project horizontal sampling toward a vanishing point while still drawing full width.
-        perspective_scale = _lerp(1.0, min_perspective_scale, d)
-        inv_scale = 1.0 / perspective_scale
-        for x_screen in range(w):
-            x_projected = center_x + ((float(x_screen) - center_x) * inv_scale)
-            y = y_base + (
-                amp1 * math.sin((freq1 * x_projected) + phase1)
-            ) + (
-                amp2 * math.sin((freq2 * x_projected) + phase2)
-            )
-            yi = int(round(y))
-            if 0 <= yi < h:
-                canvas.SetPixel(x_screen, yi, r, g, b)
+        y_bottom = h - 2
+        y_top = max(1, h // 8)
 
+        base_freq = 0.12
+        top_freq_mult = 2.8
+        base_amp = max(1.0, h * 0.11)
+        top_amp_mult = 0.35
+
+        speed1 = 2.6
+        speed2 = 1.6
+        center_x = 0.5 * float(w - 1)
+        min_perspective_scale = 0.28
+
+        for i in range(N_LAYERS - 1, -1, -1):
+            d = 0.0 if N_LAYERS <= 1 else (i / (N_LAYERS - 1))
+            t = d ** 0.6
+            y_base = _lerp(float(y_bottom), float(y_top), t)
+
+            freq1 = base_freq * _lerp(1.0, top_freq_mult, d)
+            amp1 = base_amp * _lerp(1.0, top_amp_mult, d)
+            freq2 = freq1 * 2.2
+            amp2 = amp1 * 0.22
+
+            phase_layer = d * 1.7
+            drift_phase, drift_speed, drift_f1, drift_f2 = self._layer_drift[i]
+            drift = math.sin((t_point * drift_speed) + drift_phase)
+            freq1 *= (1.0 + (drift_f1 * drift))
+            freq2 *= (1.0 - (drift_f2 * drift))
+            phase1 = (t_point * speed1) + phase_layer + (0.25 * drift)
+            phase2 = (t_point * speed2) - (phase_layer * 0.6) - (0.15 * drift)
+
+            highlighted = self._held_pc_counts[i] > 0
+            if highlighted:
+                rgb = _PALETTE[i]
+            else:
+                dim = _lerp(0.22, 0.05, d)
+                rgb = _scale_color(_PALETTE[i], dim)
+
+            r, g, b = rgb
+            if r == 0 and g == 0 and b == 0:
+                continue
+
+            perspective_scale = _lerp(1.0, min_perspective_scale, d)
+            inv_scale = 1.0 / perspective_scale
+            for x_screen in range(w):
+                x_projected = center_x + ((float(x_screen) - center_x) * inv_scale)
+                y = y_base + (
+                    amp1 * math.sin((freq1 * x_projected) + phase1)
+                ) + (
+                    amp2 * math.sin((freq2 * x_projected) + phase2)
+                )
+                yi = int(round(y))
+                if 0 <= yi < h:
+                    canvas.SetPixel(x_screen, yi, r, g, b)
+
+
+# ---------------------------------------------------------------------------
+# Standalone execution
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Minimal standalone smoke test (no MIDI). Useful on dev machines.
     import time
     from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
@@ -216,14 +184,16 @@ if __name__ == "__main__":
 
     matrix = RGBMatrix(options=options)
     canvas = matrix.CreateFrameCanvas()
-    setup(matrix)
-    activate()
+
+    effect = MultiSinwavesEffect(matrix.width, matrix.height)
+    effect.setup(matrix)
+    effect.activate()
     start = time.time()
     try:
         while True:
             t = time.time() - start
             canvas.Clear()
-            draw(canvas, matrix, t)
+            effect.draw(canvas, matrix, t)
             canvas = matrix.SwapOnVSync(canvas)
     except KeyboardInterrupt:
         matrix.Clear()

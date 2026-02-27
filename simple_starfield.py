@@ -4,32 +4,18 @@ import time
 import math
 import os
 import random
-from typing import Tuple
+from typing import Optional, Tuple, List
 
 import numpy as np
 
-# Global pixel state as a numpy array for fast access
-# Shape: (height, width, 3) for RGB values
-pixel_state = None
+from effect import Effect, Param
+from midi import MidiNote
 
-# Optional module-level state so other code can call draw(canvas, matrix, t_point)
-_stars = None
-_last_t_point = None
-_is_setup = False
 
-# Optional MIDI-driven controls (set by main.py)
-_speed_mult = 1.0       # 0.5..4 typical
-_color_amount = 1.0     # 0=grayscale (no hue), 1=colored (default preserves current look)
-# Treat very small color amounts as 0 to avoid faint tint from CC jitter/rounding.
-_COLOR_DEADZONE = 0.03  # 0..1
+# ---------------------------------------------------------------------------
+# Configuration from environment
+# ---------------------------------------------------------------------------
 
-# Star color palette + optional beat-synced spawn override.
-_STAR_COLOR_PALETTE = ("white", "blue", "cyan", "yellow", "orange", "red")
-_spawn_color_type = None  # None or a palette entry (str)
-
-# Avoid spawning stars right on the center pixel (looks odd and can "stick" due
-# to the tiny-delta movement guard in Star.update()).
-# Can be overridden with PSIWAVE_STARFIELD_CENTER_CLEAR_PX, in pixels.
 try:
     _CENTER_CLEAR_RADIUS_PX = float(os.environ.get("PSIWAVE_STARFIELD_CENTER_CLEAR_PX", "2.0"))
 except Exception:
@@ -37,97 +23,24 @@ except Exception:
 if _CENTER_CLEAR_RADIUS_PX < 0.0:
     _CENTER_CLEAR_RADIUS_PX = 0.0
 
-# Debug logging (disabled by default; enable with PSIWAVE_DEBUG_STARFIELD=1)
-_debug = os.environ.get("PSIWAVE_DEBUG_STARFIELD", "").strip() not in ("", "0", "false", "False", "no", "NO")
-_debug_last_draw_log_t = -1e9
-_debug_draw_log_interval_s = 1.0
+_STAR_COLOR_PALETTE = ("white", "blue", "cyan", "yellow", "orange", "red")
 
-def set_debug(enabled: bool = True) -> None:
-    """Enable/disable starfield debug logs."""
-    global _debug
-    _debug = bool(enabled)
+_COLOR_DEADZONE = 0.03
 
-def _dbg(msg: str) -> None:
-    if _debug:
-        print(f"[starfield] {msg}")
 
-def set_spawn_color_type(color_type) -> None:
-    """
-    Set the color_type assigned to newly-spawned stars (i.e. stars that respawn off-screen).
+# ---------------------------------------------------------------------------
+# Star helper
+# ---------------------------------------------------------------------------
 
-    When set to a valid palette entry, all respawns will use that color until changed.
-    Set to None to disable the override (respawns become random again).
-    """
-    global _spawn_color_type
-    if color_type is None:
-        if _spawn_color_type is not None:
-            _spawn_color_type = None
-            _dbg("spawn_color_type cleared")
-        return
-
-    ct = str(color_type)
-    if ct not in _STAR_COLOR_PALETTE:
-        return
-    if ct != _spawn_color_type:
-        _spawn_color_type = ct
-        _dbg(f"spawn_color_type -> {ct}")
-
-def init_pixel_state(height, width):
-    """Initialize the pixel state array"""
-    global pixel_state
-    pixel_state = np.zeros((height, width, 3), dtype=np.uint8)
-
-def merge_pixels(canvas, x, y, c1, c2, c3, blend=True):
-    """
-    Blend the new pixel color with existing color by taking the maximum value of each RGB component.
-    Set blend=False to skip blending and just set the pixel directly.
-    Returns the blended color tuple.
-    """
-    global pixel_state
-    
-    if blend:
-        # Get current pixel color from our numpy array
-        current_color = pixel_state[y, x]
-        
-        # Blend by taking the maximum of each RGB component
-        blended_r = max(current_color[0], c1)
-        blended_g = max(current_color[1], c2)
-        blended_b = max(current_color[2], c3)
-        
-        # Update our pixel state array
-        pixel_state[y, x] = [blended_r, blended_g, blended_b]
-        
-        # Set the blended pixel on the canvas
-        canvas.SetPixel(x, y, blended_r, blended_g, blended_b)
-        
-        return (blended_r, blended_g, blended_b)
-    else:
-        # Skip blending, just set the pixel directly
-        pixel_state[y, x] = [c1, c2, c3]
-        canvas.SetPixel(x, y, c1, c2, c3)
-        return (c1, c2, c3)
-
-def clear_pixel_state():
-    """Reset the pixel state array to all zeros"""
-    global pixel_state
-    if pixel_state is not None:
-        pixel_state.fill(0)
-
-def _spawn_near_center(matrix_width: int, matrix_height: int, *, x_span: float, y_span: float) -> Tuple[float, float]:
-    """
-    Spawn a point near the center, but not *too* close to it.
-
-    This prevents occasional spawns exactly on the center pixel, which is visually
-    distracting and can also result in a star that barely moves.
-    """
+def _spawn_near_center(
+    matrix_width: int, matrix_height: int,
+    *, x_span: float, y_span: float,
+) -> Tuple[float, float]:
     center_x = matrix_width / 2
     center_y = matrix_height / 2
-
-    # Scale the exclusion radius mildly with panel size, but keep a sensible floor.
     r_min = max(_CENTER_CLEAR_RADIUS_PX, 0.03 * min(matrix_width, matrix_height))
     r2_min = r_min * r_min
 
-    # Try a few random samples first.
     for _ in range(32):
         x = center_x + random.uniform(-x_span, x_span)
         y = center_y + random.uniform(-y_span, y_span)
@@ -136,82 +49,63 @@ def _spawn_near_center(matrix_width: int, matrix_height: int, *, x_span: float, 
         if (dx * dx + dy * dy) >= r2_min:
             return (x, y)
 
-    # Fallback: put it on the exclusion circle at a random angle.
     a = random.uniform(0.0, 2.0 * math.pi)
-    x = center_x + math.cos(a) * r_min
-    y = center_y + math.sin(a) * r_min
-    return (x, y)
+    return (center_x + math.cos(a) * r_min, center_y + math.sin(a) * r_min)
+
 
 class Star:
-    def __init__(self, matrix_width, matrix_height):
-        # Start stars near center
+    __slots__ = ("x", "y", "brightness", "speed", "twinkle_speed", "twinkle_phase", "color_type")
+
+    def __init__(self, matrix_width: int, matrix_height: int):
         self.x, self.y = _spawn_near_center(matrix_width, matrix_height, x_span=15, y_span=12)
         self.brightness = random.randint(50, 255)
-        self.speed = random.uniform(1.5, 4.0)  # Increased speeds for faster movement
+        self.speed = random.uniform(1.5, 4.0)
         self.twinkle_speed = random.uniform(0.02, 0.08)
         self.twinkle_phase = random.uniform(0, 2 * math.pi)
-        
-        # Add color variety to stars
-        self.color_type = random.choice(_STAR_COLOR_PALETTE)
-        
-    def update(self, dt, matrix_width, matrix_height):
-        """Update star position and twinkling - optimized for speed"""
-        # Move star outward from center (simulating movement toward viewer)
+        self.color_type: str = random.choice(_STAR_COLOR_PALETTE)
+
+    def update(self, dt: float, matrix_width: int, matrix_height: int, spawn_color_type: Optional[str]) -> None:
         center_x = matrix_width / 2
         center_y = matrix_height / 2
-        
-        # Calculate direction from center
         dx = self.x - center_x
         dy = self.y - center_y
-        
-        # Move outward from center - simplified math for speed
-        if abs(dx) > 0.1 or abs(dy) > 0.1:  # Avoid division by zero
-            # Use faster approximation instead of sqrt
-            length = abs(dx) + abs(dy)  # Manhattan distance approximation
+
+        if abs(dx) > 0.1 or abs(dy) > 0.1:
+            length = abs(dx) + abs(dy)
             if length > 0:
-                # Smoother movement with velocity-based updates
-                self.x += (dx / length) * self.speed * dt * 2.5  # Increased speed
+                self.x += (dx / length) * self.speed * dt * 2.5
                 self.y += (dy / length) * self.speed * dt * 2.5
-        
-        # Reset star if it goes off screen
-        if (self.x < 0 or self.x >= matrix_width or 
-            self.y < 0 or self.y >= matrix_height):
-            # Place star randomly near center
+
+        if self.x < 0 or self.x >= matrix_width or self.y < 0 or self.y >= matrix_height:
             self.x, self.y = _spawn_near_center(matrix_width, matrix_height, x_span=8, y_span=6)
-            # Treat respawns as "new stars": optionally force a shared spawn color (e.g. beat-synced).
-            if _spawn_color_type is not None:
-                self.color_type = _spawn_color_type
+            if spawn_color_type is not None:
+                self.color_type = spawn_color_type
             else:
                 self.color_type = random.choice(_STAR_COLOR_PALETTE)
-            
-        # Update twinkling less frequently for speed
+
         self.twinkle_phase += self.twinkle_speed * 0.5
-        
-    def get_color(self):
-        """Get current star color with twinkling effect"""
+
+    def get_color(self, color_amount: float) -> Tuple[int, int, int]:
         twinkle = 0.5 + 0.5 * math.sin(self.twinkle_phase)
         brightness = int(self.brightness * twinkle)
-        
-        # Apply color based on star type
-        if self.color_type == 'white':
-            colored = (brightness, brightness, brightness)
-        elif self.color_type == 'blue':
-            colored = (brightness//3, brightness//3, brightness)
-        elif self.color_type == 'cyan':
-            colored = (brightness//3, brightness, brightness)
-        elif self.color_type == 'yellow':
-            colored = (brightness, brightness, brightness//3)
-        elif self.color_type == 'orange':
-            colored = (brightness, brightness//2, brightness//6)
-        elif self.color_type == 'red':
-            colored = (brightness, brightness//6, brightness//6)
-        else:
-            colored = (brightness, brightness, brightness)  # fallback to white
 
-        # Mix towards white based on _color_amount (0=white, 1=colored).
-        a = _color_amount
+        if self.color_type == "white":
+            colored = (brightness, brightness, brightness)
+        elif self.color_type == "blue":
+            colored = (brightness // 3, brightness // 3, brightness)
+        elif self.color_type == "cyan":
+            colored = (brightness // 3, brightness, brightness)
+        elif self.color_type == "yellow":
+            colored = (brightness, brightness, brightness // 3)
+        elif self.color_type == "orange":
+            colored = (brightness, brightness // 2, brightness // 6)
+        elif self.color_type == "red":
+            colored = (brightness, brightness // 6, brightness // 6)
+        else:
+            colored = (brightness, brightness, brightness)
+
+        a = color_amount
         if a <= _COLOR_DEADZONE:
-            # When color is removed, return pure grayscale (no hue).
             return (brightness, brightness, brightness)
         if a >= 1.0:
             return colored
@@ -221,115 +115,97 @@ class Star:
             int(gray[1] + (colored[1] - gray[1]) * a),
             int(gray[2] + (colored[2] - gray[2]) * a),
         )
-    
 
 
-def create_starfield(num_stars, matrix_width, matrix_height):
-    """Create a collection of stars"""
-    return [Star(matrix_width, matrix_height) for _ in range(num_stars)]
+# ---------------------------------------------------------------------------
+# StarfieldEffect
+# ---------------------------------------------------------------------------
 
-def update_starfield(stars, dt, matrix_width, matrix_height):
-    """Update all stars"""
-    for star in stars:
-        star.update(dt, matrix_width, matrix_height)
-
-def draw_starfield(canvas, stars):
-    """Draw all stars with optimized rendering and motion blur"""
-    # Pre-calculate colors for all stars to avoid repeated calculations
-    colors = []
-    for star in stars:
-        if 0 <= star.y < canvas.height and 0 <= star.x < canvas.width:
-            colors.append((int(star.x), int(star.y), star.get_color()))
-    
-    # Batch draw all visible stars with motion blur
-    for x, y, color in colors:
-        # Main star
-        merge_pixels(canvas, x, y, color[0], color[1], color[2], blend=False)
-
-
-def setup(matrix, num_stars=100):
+class StarfieldEffect(Effect):
     """
-    Initialize module-level starfield state so callers can use draw().
-    Safe to call multiple times.
+    Expanding starfield effect.
+
+    Parameters (set via MidiRouter):
+        speed        -- speed multiplier (0.5..4 typical, default 1.0)
+        color_amount -- 0 = grayscale, 1 = colored (default 1.0)
     """
-    global _stars, _last_t_point, _is_setup
-    init_pixel_state(matrix.height, matrix.width)
-    _stars = create_starfield(num_stars, matrix.width, matrix.height)
-    _last_t_point = None
-    _is_setup = True
+
+    speed = Param(default=1.0)
+    color_amount = Param(default=1.0)
+
+    def __init__(self, width: int, height: int, num_stars: int = 100):
+        super().__init__(width, height)
+        self._num_stars = num_stars
+        self._stars: Optional[List[Star]] = None
+        self._last_t_point: Optional[float] = None
+        self._pixel_state: Optional[np.ndarray] = None
+        self._spawn_color_type: Optional[str] = None
+        self._debug = os.environ.get("PSIWAVE_DEBUG_STARFIELD", "").strip() not in ("", "0", "false", "False", "no", "NO")
+        self._debug_last_draw_log_t = -1e9
+
+    def set_debug(self, enabled: bool = True) -> None:
+        self._debug = bool(enabled)
+
+    def set_spawn_color_type(self, color_type) -> None:
+        """Override the color assigned to newly-spawned stars (e.g. beat-synced)."""
+        if color_type is None:
+            self._spawn_color_type = None
+            return
+        ct = str(color_type)
+        if ct in _STAR_COLOR_PALETTE:
+            self._spawn_color_type = ct
+
+    def setup(self, matrix) -> None:
+        self.width = int(matrix.width)
+        self.height = int(matrix.height)
+        self._pixel_state = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        self._stars = [Star(self.width, self.height) for _ in range(self._num_stars)]
+        self._last_t_point = None
+
+    def activate(self) -> None:
+        self._last_t_point = None
+
+    def draw(self, canvas, matrix, t_point: float) -> None:
+        w = int(matrix.width)
+        h = int(matrix.height)
+
+        if self._stars is None or self._pixel_state is None:
+            self.setup(matrix)
+            assert self._stars is not None and self._pixel_state is not None
+
+        speed_mult = self.get_param("speed")
+        color_amount = self.get_param("color_amount")
+
+        if self._last_t_point is None:
+            dt = 0.0
+        else:
+            dt = max(0.0, t_point - self._last_t_point) * speed_mult
+        self._last_t_point = t_point
+
+        self._pixel_state.fill(0)
+
+        for star in self._stars:
+            star.update(dt, w, h, self._spawn_color_type)
+
+        for star in self._stars:
+            sx, sy = int(star.x), int(star.y)
+            if 0 <= sy < h and 0 <= sx < w:
+                r, g, b = star.get_color(color_amount)
+                self._pixel_state[sy, sx] = [r, g, b]
+                canvas.SetPixel(sx, sy, r, g, b)
+
+        if self._debug and (t_point - self._debug_last_draw_log_t) >= 1.0:
+            self._debug_last_draw_log_t = t_point
+            print(
+                f"[starfield] draw t={t_point:.2f}s dt={dt:.4f}s speed_mult={speed_mult:.3f} "
+                f"color_amount={color_amount:.3f} stars={len(self._stars)}"
+            )
 
 
-def activate():
-    """Called when switching back to this demo (prevents a large dt jump)."""
-    global _last_t_point
-    _last_t_point = None
+# ---------------------------------------------------------------------------
+# Standalone execution
+# ---------------------------------------------------------------------------
 
-
-def handle_midi_cc(cc):
-    """Hook for MIDI CC messages (currently unused)."""
-    return
-
-
-def set_speed_mult(mult: float) -> None:
-    """Set starfield speed multiplier (0.5..4 typical)."""
-    global _speed_mult
-    try:
-        m = float(mult)
-    except Exception:
-        return
-    if m < 0.0:
-        m = 0.0
-    _speed_mult = m
-
-
-def set_color_amount(amount: float) -> None:
-    """Set starfield color amount (0=grayscale/no hue, 1=colored)."""
-    global _color_amount
-    try:
-        a = float(amount)
-    except Exception:
-        return
-    if a < 0.0:
-        a = 0.0
-    elif a > 1.0:
-        a = 1.0
-    raw = a
-    if a <= _COLOR_DEADZONE:
-        a = 0.0
-    _color_amount = a
-    _dbg(f"set_color_amount raw={raw:.4f} deadzone={_COLOR_DEADZONE:.4f} -> {_color_amount:.4f}")
-
-
-def draw(canvas, matrix, t_point):
-    """
-    Draw a frame of the starfield at time t_point (seconds).
-    Caller should clear the canvas before calling if desired.
-    """
-    global _stars, _last_t_point, _is_setup
-
-    if not _is_setup or _stars is None:
-        setup(matrix)
-
-    if _last_t_point is None:
-        dt = 0.0
-    else:
-        dt = max(0.0, t_point - _last_t_point) * _speed_mult
-    _last_t_point = t_point
-
-    clear_pixel_state()
-    update_starfield(_stars, dt, matrix.width, matrix.height)
-    draw_starfield(canvas, _stars)
-
-    # Periodic debug status (rate-limited to avoid flooding the console).
-    global _debug_last_draw_log_t
-    if _debug and (t_point - _debug_last_draw_log_t) >= _debug_draw_log_interval_s:
-        _debug_last_draw_log_t = t_point
-        _dbg(
-            f"draw t={t_point:.2f}s dt={dt:.4f}s speed_mult={_speed_mult:.3f} "
-            f"color_amount={_color_amount:.3f} stars={len(_stars) if _stars is not None else 0}"
-        )
-
-# --- Main execution block ---
 if __name__ == "__main__":
     from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
@@ -337,53 +213,33 @@ if __name__ == "__main__":
     options.rows = 40
     options.cols = 80
     options.hardware_mapping = 'adafruit-hat'
-    options.gpio_slowdown = 1  # Fastest possible
-    options.brightness = 50     # Lower brightness for better performance
+    options.gpio_slowdown = 1
+    options.brightness = 50
     options.pwm_bits = 8
     options.pwm_lsb_nanoseconds = 250
-    options.multiplexing = 20    
-    # Add this line if you see a lot of "ghosting" or flickering.
-    # It's a good default for Adafruit HATs.
+    options.multiplexing = 20
     options.disable_hardware_pulsing = True
 
     matrix = RGBMatrix(options=options)
     canvas = matrix.CreateFrameCanvas()
-    
-    # Initialize the pixel state array
-    init_pixel_state(matrix.height, matrix.width)
-    
-    # Create starfield
-    num_stars = 100  # Adjust this for more/fewer stars
-    stars = create_starfield(num_stars, matrix.width, matrix.height)
+
+    effect = StarfieldEffect(matrix.width, matrix.height)
+    effect.setup(matrix)
+    effect.activate()
 
     start_time = time.time()
-    last_time = start_time
-
     print("Starting starfield animation... Press CTRL-C to stop.")
     try:
         while True:
             current_time = time.time()
-            dt = current_time - last_time
-            last_time = current_time
-            
-            # Clear canvas and pixel state
             canvas.Clear()
-            clear_pixel_state()
-            
-            # Update and draw stars
-            update_starfield(stars, dt, matrix.width, matrix.height)
-            draw_starfield(canvas, stars)
-            
-            # Swap buffers
+            t_point = current_time - start_time
+            effect.draw(canvas, matrix, t_point)
             canvas = matrix.SwapOnVSync(canvas)
-            
-            # Adaptive frame timing for smooth animation
-            target_fps = 60
-            frame_time = 1.0 / target_fps
             elapsed = time.time() - current_time
+            frame_time = 1.0 / 60
             if elapsed < frame_time:
                 time.sleep(frame_time - elapsed)
-
     except KeyboardInterrupt:
         print("\nExiting...")
         matrix.Clear()
