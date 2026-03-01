@@ -113,6 +113,8 @@ class ScreenMatrix:
 
     def _init_display(self) -> None:
         _configure_wsl_display()
+        # Prevent fullscreen window from minimizing when clicking another window (e.g. on extended display).
+        os.environ.setdefault("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0")
         try:
             import pygame
         except ImportError as e:

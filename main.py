@@ -387,9 +387,9 @@ def run(args, matrix, use_windows_mm_midi: bool = False):
                     text_scroll_phase_px = (float(ticks) / 24.0) * 8.0
                     text_fx.set_scroll_phase(text_scroll_phase_px)
 
-                    # Scanline: one sweep per bar (4 beats)
+                    # Scanline: 4 beats to cross matrix (L→R), 8 beats full cycle (L→R→L)
                     beats = float(ticks) / 24.0
-                    bar_phase = (beats % 4.0) / 4.0
+                    bar_phase = (beats % 8.0) / 8.0
                     scanline_fx.set_sweep_phase(bar_phase)
 
                     # Speed sync: lock sinwave phase to clock

@@ -11,36 +11,51 @@ from midi import MidiNote
 
 # We will calculate these dynamically in setup() to fit the matrix
 DEFAULT_ROWS_PER_SLOT = 2
-BAR_DURATION = 2.0  # seconds per full cycle (L->R->L)
+# Full cycle = 8 beats (4 beats L→R, 4 beats R→L). Fallback at 120 BPM: 8 beats = 4 sec
+BAR_DURATION = 4.0
 # How long (ms) note bars persist after note-off, fading to black
 TRAIL_SUSTAIN_MS = 1500
 
-# One colour per MIDI channel (1–16): (r, g, b) 0–255
+# Base colour per MIDI channel (1-16).
 CHANNEL_COLORS = [
-    (0, 200, 100),    # 1: seafoam green
-    (255, 100, 100),  # 2: coral red
-    (100, 150, 255),  # 3: sky blue
-    (255, 200, 0),    # 4: amber
-    (200, 100, 255),  # 5: purple
-    (0, 255, 200),    # 6: cyan
-    (255, 150, 50),   # 7: orange
-    (150, 255, 100),  # 8: lime
-    (255, 100, 200),  # 9: pink
-    (100, 255, 200),  # 10: mint
-    (255, 220, 100),  # 11: gold
-    (100, 100, 255),  # 12: periwinkle
-    (200, 255, 100),  # 13: yellow-green
-    (255, 100, 150),  # 14: rose
-    (100, 200, 255),  # 15: light blue
-    (220, 0, 0),  # 16: Red
+    (255, 80, 80),     # 1: red
+    (255, 160, 60),    # 2: orange
+    (255, 220, 60),    # 3: amber / gold
+    (200, 255, 80),    # 4: lime
+    (80, 255, 120),    # 5: green
+    (60, 255, 200),    # 6: teal
+    (60, 220, 255),    # 7: cyan
+    (80, 140, 255),    # 8: sky blue
+    (120, 100, 255),   # 9: blue-violet
+    (200, 80, 255),    # 10: purple
+    (255, 80, 200),    # 11: magenta
+    (255, 100, 140),   # 12: pink
+    (100, 100, 255),   # 13: periwinkle
+    (200, 255, 100),   # 14: yellow-green
+    (255, 100, 150),   # 15: rose
+    (100, 200, 255),   # 16: light blue
 ]
+
+
+def _color_for_note(
+    channel: int, note: int, num_slots: int
+) -> Tuple[Tuple[int, int, int], float]:
+    """Base colour from channel; page = note // num_slots; pages 0,1 full sat, then decrease."""
+    base = CHANNEL_COLORS[(channel - 1) % len(CHANNEL_COLORS)]
+    page = note // num_slots
+    # Pages 0 and 1 fully saturated; as page increases, decrease saturation
+    if page <= 1:
+        sat = 1.0
+    else:
+        sat = max(0.2, 1.0 - (page - 1) * 0.25'm)
+    return (base, sat)
 
 class ScanlineNotesEffect(Effect):
     def __init__(self, width: int, height: int, verbose: bool = False):
         super().__init__(width, height)
         self._verbose = verbose
-        # Each slot: list of (phase_on, t_off_or_None, phase_off_or_None, channel). When released, phase_off = bar end (frozen).
-        self._active_note_phases: List[List[Tuple[float, Optional[float], Optional[float], int]]] = []
+        # Each slot: list of (phase_on, t_off_or_None, phase_off_or_None, channel, note). When released, phase_off = bar end (frozen).
+        self._active_note_phases: List[List[Tuple[float, Optional[float], Optional[float], int, int]]] = []
         self._external_sweep_phase: Optional[float] = None
         self._last_t = 0.0
         self._n_slots = 0
@@ -89,12 +104,12 @@ class ScanlineNotesEffect(Effect):
                 print(f"[Scanline] Note {n} ({status_str}) ch={channel} -> Slot {slot} (Phase: {current_phase:.3f})")
 
             if is_on:
-                self._active_note_phases[slot].append((current_phase, None, None, channel))
+                self._active_note_phases[slot].append((current_phase, None, None, channel, n))
             else:
                 # Mark the first still-held note as released (freeze bar end at current phase, start fade)
-                for i, (p, t_off, _, ch) in enumerate(self._active_note_phases[slot]):
+                for i, (p, t_off, _, ch, note) in enumerate(self._active_note_phases[slot]):
                     if t_off is None:
-                        self._active_note_phases[slot][i] = (p, self._last_t, current_phase, ch)
+                        self._active_note_phases[slot][i] = (p, self._last_t, current_phase, ch, note)
                         break
                 else:
                     if self._verbose:
@@ -142,7 +157,7 @@ class ScanlineNotesEffect(Effect):
         for s in range(self._n_slots):
             # Drop expired trails (released and past sustain time)
             self._active_note_phases[s] = [
-                (p, t, po, ch) for (p, t, po, ch) in self._active_note_phases[s]
+                (p, t, po, ch, note) for (p, t, po, ch, note) in self._active_note_phases[s]
                 if t is None or (t_point - t) < self._trail_sustain_s
             ]
             if not self._active_note_phases[s]:
@@ -152,17 +167,18 @@ class ScanlineNotesEffect(Effect):
             y0 = (self._n_slots - 1 - s) * self._rows_per_slot
             y1 = min(y0 + self._rows_per_slot, self.height)
 
-            # Draw lower channels first so higher channel numbers appear in the foreground
-            slot_notes = sorted(self._active_note_phases[s], key=lambda nt: nt[3])  # nt[3] = channel
-            for phase_on, t_off, phase_off, channel in slot_notes:
+            # Draw lower notes first so higher notes appear in the foreground
+            slot_notes = sorted(self._active_note_phases[s], key=lambda nt: nt[4])  # nt[4] = note
+            for phase_on, t_off, phase_off, channel, note in slot_notes:
                 # Brightness: full while held; linear fade to black over sustain period after release
                 if t_off is None:
-                    brightness = 1.0
+                    release_brightness = 1.0
                 else:
                     age = t_point - t_off
-                    brightness = max(0.0, 1.0 - age / self._trail_sustain_s)
+                    release_brightness = max(0.0, 1.0 - age / self._trail_sustain_s)
 
-                base_rgb = CHANNEL_COLORS[(channel - 1) % len(CHANNEL_COLORS)]
+                base_rgb, page_sat = _color_for_note(channel, note, self._n_slots)
+                brightness = release_brightness * page_sat
 
                 # Bar end: keep growing while held; freeze at release so it becomes a hanging block
                 if t_off is None:
