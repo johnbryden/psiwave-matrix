@@ -136,26 +136,14 @@ class ScanlineNotesEffect(Effect):
             return int(2.0 * p * w)
         return int(2.0 * (1.0 - p) * w)
 
-    def _scanline_x_for_row(self, x_logical: int, y: int) -> int:
-        """Return logical x so the scanline appears vertical on serpentine/zigzag panels.
-        On such panels odd rows are wired R→L; flipping x on odd rows keeps the line straight."""
-        if (y % 2) == 0:
-            return x_logical
-        return (self.width - 1) - x_logical
-
     def _draw_row_segment(self, canvas, x0: int, x1: int, y_start: int, y_end: int, base_rgb: Tuple[int, int, int], brightness: float = 1.0):
         lo, hi = (x0, x1) if x0 < x1 else (x1, x0)
         lo = max(0, min(self.width - 1, lo))
         hi = max(0, min(self.width - 1, hi))
         brightness = max(0.0, min(1.0, brightness))
         r, g, b = (int(c * brightness) for c in base_rgb)
-        w = self.width - 1
         for y in range(y_start, y_end):
-            if (y % 2) == 0:
-                x_lo, x_hi = lo, hi
-            else:
-                x_lo, x_hi = w - hi, w - lo
-            for x in range(x_lo, x_hi + 1):
+            for x in range(lo, hi + 1):
                 canvas.SetPixel(x, y, r, g, b)
 
     def draw(self, canvas, matrix, t_point: float) -> None:
@@ -218,7 +206,6 @@ class ScanlineNotesEffect(Effect):
                         self._draw_row_segment(canvas, x_on, edge_x, y0, y1, base_rgb, brightness)
                         self._draw_row_segment(canvas, edge_x, x_end, y0, y1, base_rgb, brightness)
 
-        # Draw Scanline playhead (Bright White/Cyan), serpentine-aware so it stays vertical
+        # Draw Scanline playhead (Bright White/Cyan)
         for y in range(self.height):
-            x = self._scanline_x_for_row(x_scan, y)
-            canvas.SetPixel(x, y, 200, 255, 255)
+            canvas.SetPixel(x_scan, y, 200, 255, 255)
